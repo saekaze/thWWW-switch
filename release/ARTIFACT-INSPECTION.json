@@ -1,0 +1,99 @@
+{
+  "project": "thWWW-switch",
+  "validation_date": "2026-09-09",
+  "source_commit": "27084d401d2144d830f477dc09cac126cefd2fae",
+  "toolchain": {
+    "devkitA64_gcc": "15.2.0",
+    "configuration": "Release; WAD17 only; modern GLES/OpenAL; warnings as errors; normalized build paths"
+  },
+  "artifacts": {
+    "thwww.nro": {
+      "size": 8814703,
+      "sha256": "fd5b8c823d4ac5ab485fae3524b5d975ce5cb12edf8d5ee005d181c9529eb520"
+    },
+    "thwww.nacp": {
+      "size": 16384,
+      "sha256": "228373b79e2520734fc585316d8c787cb0254d664565a7e8ed6237ce040dad00"
+    },
+    "thwww.elf": {
+      "size": 36885912,
+      "sha256": "7de73ea1acd51d54fc238c539632ae943fc2972e2babd0b14058b60b54d93bd7"
+    }
+  },
+  "nro": {
+    "core_size": 8761344,
+    "total_size": 8814703,
+    "asset_header_version": 0,
+    "embedded_assets": {
+      "icon": {
+        "offset": 56,
+        "size": 36919,
+        "sha256": "689d2b747a0c554b29503c2e67be78b0fc818e4a263ed849a149593e4096be95"
+      },
+      "nacp": {
+        "offset": 36975,
+        "size": 16384,
+        "sha256": "228373b79e2520734fc585316d8c787cb0254d664565a7e8ed6237ce040dad00"
+      },
+      "romfs": {
+        "offset": 0,
+        "size": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "icon": {
+      "source": "assets/icon.jpg",
+      "format": "JPEG",
+      "dimensions": [
+        256,
+        256
+      ],
+      "sha256": "689d2b747a0c554b29503c2e67be78b0fc818e4a263ed849a149593e4096be95"
+    },
+    "nacp": {
+      "name": "Wonderful Waking World",
+      "author": "Oligarchomp / thWWW-switch",
+      "version": "1.0.1",
+      "matching_populated_language_slots": 12
+    },
+    "romfs_empty": true,
+    "required_binary_markers": [
+      "SWITCH",
+      "gml_Object_obj_dialogue_Step_0",
+      "Wonderful Waking World - thWWW-switch 1.0.1"
+    ],
+    "obsolete_thWWW_NX_marker_absent": true,
+    "private_workspace_paths_absent": true
+  },
+  "switch_contract": {
+    "controls": {
+      "movement": "left stick / D-Pad",
+      "A": "bomb / cancel",
+      "B": "shoot / confirm",
+      "L": "focus",
+      "R (hold)": "dialogue skip only",
+      "Plus": "pause",
+      "other buttons / right stick": "inert"
+    },
+    "fixed_logical_bindings": {
+      "shot": 32769,
+      "bomb": 32770,
+      "focus": 32771,
+      "pause": 32773
+    },
+    "new_score_name": "SWITCH",
+    "existing_score_names_preserved": true,
+    "source_contract_check": "PASS"
+  },
+  "regressions": [
+    "PASS: pooled precise danmaku collision registered (miss=2, life=-1)",
+    "PASS: dense precise-graze workload preserved (graze=41, danmaku=330, graze_boxes=298, miss=0)",
+    "PASS: same deterministic suite under AddressSanitizer with detect_leaks=0"
+  ],
+  "physical_switch_runtime_reference": {
+    "status": "corrected runtime build confirmed working perfectly by tester before public control/branding changes",
+    "sha256": "a60e41bf1472320b47a22f9441c9d214b8632353c875bcbe21c36bdf9b7dfa0e"
+  },
+  "installer": "PASS: verified official 1.0.1 archive and copied the exact final NRO",
+  "game_data": "Wonderful Waking World data, music, fonts, text, and Windows executable are not included in the repository or release artifacts."
+}
