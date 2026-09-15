@@ -31,13 +31,46 @@ typedef struct {
 // RValue_free's every occupied entry, then releases the entries buffer.
 void IntRValueHashMap_freeAllValues(IntRValueHashMap* map);
 
+// Grows the table. Out-of-line; called by the inlines below on the rare resize path.
+void IntRValueHashMap_grow(IntRValueHashMap* map);
+
 // Returns a pointer to the value slot for key, or nullptr if absent. The pointer is valid until the next mutation of the map.
-RValue* IntRValueHashMap_findSlot(IntRValueHashMap* map, int32_t key);
+// Inline: tens of millions of VM variable reads per spell-card run go through here.
+static inline RValue* IntRValueHashMap_findSlot(IntRValueHashMap* map, int32_t key) {
+    if (map->capacity == 0) return nullptr;
+    uint32_t idx = ((uint32_t) key * 0x9E3779B9u) & map->mask;
+    while (true) {
+        int32_t slotKey = map->entries[idx].key;
+        if (slotKey == key) return &map->entries[idx].value;
+        if (slotKey == INT_RVALUE_HASHMAP_EMPTY_KEY) return nullptr;
+        idx = (idx + 1) & map->mask;
+    }
+}
 
 // Returns a pointer to the existing value slot for key. If the key is absent, inserts an RVALUE_UNDEFINED entry first and returns that slot.
 // Replaces the hmgeti + hmput(UNDEFINED) + hmgeti pattern with a single lookup.
 // The pointer is valid until the next mutation of the map.
-RValue* IntRValueHashMap_getOrInsertUndefined(IntRValueHashMap* map, int32_t key);
+static inline RValue* IntRValueHashMap_getOrInsertUndefined(IntRValueHashMap* map, int32_t key) {
+    requireMessage(key != INT_RVALUE_HASHMAP_EMPTY_KEY, "IntRValueHashMap_getOrInsertUndefined: key -1 collides with the empty-slot sentinel");
+
+    // Resize before probing so we are guaranteed to find an empty slot. Threshold: load factor 0.75.
+    if ((map->count + 1) * 4 > map->capacity * 3) {
+        IntRValueHashMap_grow(map);
+    }
+
+    uint32_t idx = ((uint32_t) key * 0x9E3779B9u) & map->mask;
+    while (true) {
+        int32_t slotKey = map->entries[idx].key;
+        if (slotKey == key) return &map->entries[idx].value;
+        if (slotKey == INT_RVALUE_HASHMAP_EMPTY_KEY) {
+            map->entries[idx].key = key;
+            map->entries[idx].value = RValue_makeUndefined();
+            map->count++;
+            return &map->entries[idx].value;
+        }
+        idx = (idx + 1) & map->mask;
+    }
+}
 
 // Returns the number of occupied slots.
 static inline uint32_t IntRValueHashMap_count(const IntRValueHashMap* map) {

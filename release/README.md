@@ -10,9 +10,8 @@ This is a game-specific AArch64/libnx port built on the open-source [Butterscotc
 
 ## Status
 
-The port's corrected runtime build has been tested on physical Nintendo Switch hardware and confirmed working, including gameplay visibility, player damage, stage music, spell/background transitions, and dense danmaku. The public build retains those fixes and adds the fixed Saekaze-style controls, dedicated held dialogue skip, supplied icon, and `SWITCH` score name.
+The port's corrected runtime build has been tested on physical Nintendo Switch hardware and confirmed working, including gameplay visibility, player damage, stage music, spell/background transitions, and dense danmaku. The public build retains those fixes and adds the fixed controls, dedicated held dialogue skip, supplied icon, and `SWITCH` score name.
 
-For best results, launch hbmenu through **title takeover/full-memory mode**. The game uses large texture pages and uncompressed PCM music, so applet mode may not provide enough memory.
 
 ## Installation
 
@@ -22,7 +21,7 @@ For best results, launch hbmenu through **title takeover/full-memory mode**. The
 2. Create `sd:/switch/thwww/` on the SD card.
 3. Place `thwww.nro` in that folder.
 4. Extract the official archive into the same folder. `thWWW.exe` is not required.
-5. Launch **Wonderful Waking World** from hbmenu.
+5. Launch **Wonderful Waking World** from hbmenu or forwarder.
 
 The resulting layout should include:
 
@@ -51,7 +50,7 @@ The script verifies the known official archive and `data.win` hashes, excludes t
 
 ## Controls
 
-The Switch layout is fixed to match Saekaze's Touhou 7 Switch port. Saved PC/gamepad remappings do not change these physical Switch controls.
+
 
 | Switch control | Action |
 |---|---|
@@ -134,7 +133,6 @@ These hashes identify the supported release; neither file is part of this reposi
 - **Oligarchomp** — Wonderful Waking World
 - **Team Shanghai Alice / ZUN** — Touhou Project
 - **Butterscotch contributors** — open-source GameMaker runner
-- **Saekaze** — Touhou 7 Switch control and repository precedent
 - **devkitPro, libnx, SDL, OpenAL, and stb contributors** — toolchain and libraries
 
 ## Legal notice

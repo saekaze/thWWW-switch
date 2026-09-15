@@ -275,8 +275,10 @@ static GLShaderUniform* getShaderUniform(GMLShader* shader, const char* name, GL
 
 // ===[ Batch Flush ]===
 
+static long g_dbgFlushes = 0, g_dbgQuads = 0, g_dbgImmDraws = 0, g_dbgImmVerts = 0; // TEMP
 static void flushBatch(GLRenderer* gl) {
     if (gl->batchCount == 0) return;
+    g_dbgFlushes++; g_dbgQuads += gl->batchCount; // TEMP
 
     if (gl->base.currentShader != -1) {
         GMLShader* shader = &gl->gmlShaders[gl->base.currentShader];
@@ -386,6 +388,7 @@ static void glDrawVertexBuffer(Renderer* renderer, const RendererVertex* vertice
         default: break;
     }
     glDrawArrays(mode, 0, vertexCount);
+    g_dbgImmDraws++; g_dbgImmVerts += vertexCount; // TEMP
 
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, (void*) offsetof(RendererVertex, x));
     gl->batchCount = 0;
@@ -902,6 +905,15 @@ static void glDestroy(Renderer* renderer) {
 
 static void glBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH) {
     GLRenderer* gl = (GLRenderer*) renderer;
+
+    if (getenv("THWWW_GL_STATS") != nullptr) { // TEMP
+        static int lastFrame = -1;
+        int fc = gl->base.runner != nullptr ? gl->base.runner->frameCount : -1;
+        if (lastFrame != -1 && (g_dbgFlushes + g_dbgImmDraws) > 0)
+            fprintf(stderr, "GLSTAT frame=%d flushes=%ld quads=%ld immDraws=%ld immVerts=%ld\n", lastFrame, g_dbgFlushes, g_dbgQuads, g_dbgImmDraws, g_dbgImmVerts);
+        lastFrame = fc;
+        g_dbgFlushes = g_dbgQuads = g_dbgImmDraws = g_dbgImmVerts = 0;
+    }
 
     gl->batchCount = 0;
     gl->currentTextureId = 0;

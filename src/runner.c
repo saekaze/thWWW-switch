@@ -84,6 +84,47 @@ static int32_t findEventCodeIdAndOwner(Runner* runner, int32_t objectIndex, int3
     return ResolvedEventTable_lookup(&runner->eventTable, objectIndex, slot, outOwnerObjectIndex);
 }
 
+// Draw subtypes covered by the drawEventCache, in column order. DRAW_NORMAL is the main per-drawable
+// draw pass; the other 7 are the fireDrawSubtype pre/post/GUI passes. These are ALL the draw subtypes
+// GameMaker defines, but both use sites keep a lookup fallback for unknown subtypes / object ids.
+static const int32_t kDrawCacheSubtypes[DRAW_CACHE_SUBTYPES] = {
+    DRAW_NORMAL, DRAW_BEGIN, DRAW_END, DRAW_GUI_BEGIN, DRAW_GUI, DRAW_GUI_END, DRAW_PRE, DRAW_POST
+};
+
+static int32_t drawSubtypeCacheColumn(int32_t subtype) {
+    switch (subtype) {
+        case DRAW_NORMAL:    return 0;
+        case DRAW_BEGIN:     return 1;
+        case DRAW_END:       return 2;
+        case DRAW_GUI_BEGIN: return 3;
+        case DRAW_GUI:       return 4;
+        case DRAW_GUI_END:   return 5;
+        case DRAW_PRE:       return 6;
+        case DRAW_POST:      return 7;
+        default:             return -1;
+    }
+}
+
+// Precomputes per-(object, draw-subtype) event resolution. Must run after ResolvedEventTable_build;
+// the event table never changes afterwards, so the cache stays valid for the whole run.
+static void buildDrawEventCache(Runner* runner, DataWin* dataWin) {
+    runner->drawEventCache = nullptr;
+    runner->drawEventCacheObjects = 0;
+    uint32_t objCount = dataWin->objt.count;
+    if (objCount == 0) return;
+    runner->drawEventCache = (DrawEventCacheEntry*) safeCalloc((size_t) objCount * DRAW_CACHE_SUBTYPES, sizeof(DrawEventCacheEntry));
+    runner->drawEventCacheObjects = objCount;
+    for (uint32_t o = 0; o < objCount; o++) {
+        for (int32_t c = 0; c < DRAW_CACHE_SUBTYPES; c++) {
+            int32_t owner = -1;
+            int32_t codeId = findEventCodeIdAndOwner(runner, (int32_t) o, EVENT_DRAW, kDrawCacheSubtypes[c], &owner);
+            DrawEventCacheEntry* e = &runner->drawEventCache[(size_t) o * DRAW_CACHE_SUBTYPES + (uint32_t) c];
+            e->codeId = codeId;
+            e->owner = owner;
+        }
+    }
+}
+
 // ===[ Per-Object Instance Lists ]===
 // Each instance lives in the list of its own object and every ancestor object (descendant-inclusive).
 // This mirrors the native runner and lets collision dispatch iterate only the candidate instances for a target object, instead of scanning the whole room per collision event.
@@ -719,13 +760,7 @@ static void drawGMS1Backgrounds(Runner* runner, bool foreground) {
 
 // ===[ Draw ]===
 
-typedef struct {
-    int32_t sortBand;
-    int32_t depth;
-    int32_t type;
-    int32_t order;
-} DrawKey;
-
+// DrawKey lives in runner.h; each Drawable caches one as sortKey.
 static DrawKey drawableKey(const Drawable* d) {
     DrawKey k = { d->sortBand, d->depth, d->type, 0 };
     switch (d->type) {
@@ -765,6 +800,7 @@ static int compareDrawables(const void* a, const void* b) {
 static void fireDrawSubtype(Runner* runner, Drawable* drawables, int32_t drawableCount, int32_t subtype) {
     int32_t slot = EventSlotMap_lookup(&runner->eventSlotMap, EVENT_DRAW, subtype);
     if (slot == -1) return;
+    int32_t col = drawSubtypeCacheColumn(subtype);
 
     repeat(drawableCount, i) {
         Drawable* d = &drawables[i];
@@ -776,7 +812,14 @@ static void fireDrawSubtype(Runner* runner, Drawable* drawables, int32_t drawabl
             continue;
 
         int32_t ownerObjectIndex = -1;
-        int32_t codeId = ResolvedEventTable_lookup(&runner->eventTable, inst->objectIndex, slot, &ownerObjectIndex);
+        int32_t codeId;
+        if (col >= 0 && (uint32_t) inst->objectIndex < runner->drawEventCacheObjects) {
+            const DrawEventCacheEntry* e = &runner->drawEventCache[(size_t) (uint32_t) inst->objectIndex * DRAW_CACHE_SUBTYPES + (uint32_t) col];
+            codeId = e->codeId;
+            ownerObjectIndex = e->owner;
+        } else {
+            codeId = ResolvedEventTable_lookup(&runner->eventTable, inst->objectIndex, slot, &ownerObjectIndex);
+        }
         if (0 > codeId) continue;
         Runner_executeResolvedEvent(runner, inst, EVENT_DRAW, subtype, codeId, ownerObjectIndex);
     }
@@ -868,7 +911,60 @@ static void refreshDrawableDepths(Runner* runner, Drawable* drawables, int32_t c
             if (ps != nullptr) d->depth = ps->depth;
         }
         d->sortBand = drawableSortBand(runner, d->depth);
+        d->sortKey.sortBand = d->sortBand;
+        d->sortKey.depth = d->depth;
     }
+}
+
+// In-place quicksort of drawables by cached sort key. Output is identical to the
+// previous qsort(compareDrawables): DrawKey is a total order, so every correct sort
+// agrees. Median-of-3 + sentineled partitioning with an insertion cutoff; recursion
+// only into the smaller side keeps stack depth logarithmic.
+static void sortDrawablesRec(Drawable* arr, int32_t lo, int32_t hi) {
+    while (hi - lo >= 16) {
+        int32_t mid = lo + ((hi - lo) >> 1);
+        if (compareDrawKeys(&arr[mid].sortKey, &arr[lo].sortKey) < 0) {
+            Drawable tmp = arr[lo]; arr[lo] = arr[mid]; arr[mid] = tmp;
+        }
+        if (compareDrawKeys(&arr[hi].sortKey, &arr[lo].sortKey) < 0) {
+            Drawable tmp = arr[lo]; arr[lo] = arr[hi]; arr[hi] = tmp;
+        }
+        if (compareDrawKeys(&arr[hi].sortKey, &arr[mid].sortKey) < 0) {
+            Drawable tmp = arr[mid]; arr[mid] = arr[hi]; arr[hi] = tmp;
+        }
+        // arr[lo] <= pivot <= arr[hi]; move the pivot aside and partition with sentinels.
+        Drawable pivotD = arr[mid]; arr[mid] = arr[hi - 1]; arr[hi - 1] = pivotD;
+        const DrawKey* pivot = &arr[hi - 1].sortKey;
+        int32_t i = lo, j = hi - 1;
+        for (;;) {
+            do { i++; } while (compareDrawKeys(&arr[i].sortKey, pivot) < 0);
+            do { j--; } while (compareDrawKeys(pivot, &arr[j].sortKey) < 0);
+            if (i >= j) break;
+            Drawable tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+        }
+        Drawable tmp = arr[i]; arr[i] = arr[hi - 1]; arr[hi - 1] = tmp;
+        // Recurse into the smaller side, loop into the larger one.
+        if (i - lo < hi - i) {
+            sortDrawablesRec(arr, lo, i - 1);
+            lo = i + 1;
+        } else {
+            sortDrawablesRec(arr, i + 1, hi);
+            hi = i - 1;
+        }
+    }
+    for (int32_t k = lo + 1; k <= hi; k++) {
+        Drawable tmp = arr[k];
+        int32_t m = k - 1;
+        while (m >= lo && compareDrawKeys(&tmp.sortKey, &arr[m].sortKey) < 0) {
+            arr[m + 1] = arr[m];
+            m--;
+        }
+        arr[m + 1] = tmp;
+    }
+}
+
+static void sortDrawablesByKey(Drawable* arr, int32_t count) {
+    if (count > 1) sortDrawablesRec(arr, 0, count - 1);
 }
 
 // Rebuilds runner->cachedDrawables when invalidated. Two-tier strategy:
@@ -893,6 +989,7 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
             d.depth = inst->depth;
             d.sortBand = drawableSortBand(runner, d.depth);
             d.instance = inst;
+            d.sortKey = drawableKey(&d);
             arrput(runner->cachedDrawables, d);
         }
 
@@ -905,6 +1002,7 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
                 d.depth = tile->tileDepth;
                 d.sortBand = drawableSortBand(runner, d.depth);
                 d.tileIndex = (int32_t) i;
+                d.sortKey = drawableKey(&d);
                 arrput(runner->cachedDrawables, d);
             }
         } else {
@@ -917,6 +1015,7 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
                 d.depth = runtimeLayer->depth;
                 d.sortBand = drawableSortBand(runner, d.depth);
                 d.runtimeLayerId = (int32_t) runtimeLayer->id;
+                d.sortKey = drawableKey(&d);
                 arrput(runner->cachedDrawables, d);
             }
         }
@@ -933,13 +1032,14 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
             d.depth = particleSystem->depth;
             d.sortBand = drawableSortBand(runner, d.depth);
             d.particleSystemId = (int32_t) i;
+            d.sortKey = drawableKey(&d);
             arrput(runner->cachedDrawables, d);
         }
         }
 
         int32_t count = (int32_t) arrlen(runner->cachedDrawables);
         if (count > 1) {
-            qsort(runner->cachedDrawables, count, sizeof(Drawable), compareDrawables);
+            sortDrawablesByKey(runner->cachedDrawables, count);
         }
         runner->drawableListStructureDirty = false;
         runner->drawableListSortDirty = false;
@@ -1064,7 +1164,14 @@ void Runner_draw(Runner* runner) {
             if (!inst->active || !inst->visible) continue;
 
             int32_t ownerObjectIndex = -1;
-            int32_t codeId = findEventCodeIdAndOwner(runner, inst->objectIndex, EVENT_DRAW, DRAW_NORMAL, &ownerObjectIndex);
+            int32_t codeId;
+            if ((uint32_t) inst->objectIndex < runner->drawEventCacheObjects) {
+                const DrawEventCacheEntry* e = &runner->drawEventCache[(size_t) (uint32_t) inst->objectIndex * DRAW_CACHE_SUBTYPES + 0];
+                codeId = e->codeId;
+                ownerObjectIndex = e->owner;
+            } else {
+                codeId = findEventCodeIdAndOwner(runner, inst->objectIndex, EVENT_DRAW, DRAW_NORMAL, &ownerObjectIndex);
+            }
             if (codeId >= 0) {
                 Runner_executeResolvedEvent(runner, inst, EVENT_DRAW, DRAW_NORMAL, codeId, ownerObjectIndex);
             } else if (runner->renderer != nullptr) {
@@ -1495,6 +1602,7 @@ static Instance** takePersistentInstances(Runner* runner) {
 
             // The spatial grid is recreated per room, so any cell coordinates the instance was tracking belong to the old grid and must not be reused.
             arrsetlen(inst->collisionCells, 0);
+            arrsetlen(inst->collisionCellSlots, 0); // Keep the parallel slot array in sync
             inst->spatialGridDirty = false;
 
             arrput(carriedPersistent, inst);
@@ -2010,6 +2118,9 @@ static void cleanupState(Runner* runner) {
         }
     }
     }
+    arrfree(runner->deadRefSweepPending);
+    runner->deadRefSweepPending = nullptr;
+
     arrfree(runner->dsMapPool);
     runner->dsMapPool = nullptr;
 
@@ -2484,6 +2595,7 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileS
     // Build the event dispatch acceleration tables.
     EventSlotMap_build(&runner->eventSlotMap, dataWin);
     ResolvedEventTable_build(&runner->eventTable, dataWin, &runner->eventSlotMap);
+    buildDrawEventCache(runner, dataWin);
     flattenCollisionEvents(runner);
 
     // Create assets map
@@ -2632,39 +2744,157 @@ void Runner_setGameArgs(Runner* runner, char** argv, int32_t argc) {
     {repeat(argc, i) arrput(runner->gameArgs, safeStrdup(argv[i]));}
 }
 
-static void Runner_clearStaleInstanceReferencesToInstance(Runner* runner, Instance* destroyedInst) {
-    if (runner == nullptr || destroyedInst == nullptr) return;
+// Bit pattern of a GMLReal for exact float-equality matching. -0.0 normalizes
+// to +0.0 so the IEEE 754 rule (-0.0 == +0.0) is preserved under bit compare.
+static uint64_t gmlRealMatchBits(GMLReal r) {
+    if (r == (GMLReal)0) r = (GMLReal)0;
+    uint64_t bits = 0;
+    memcpy(&bits, &r, sizeof(GMLReal));
+    return bits;
+}
 
-    // A destroyed instance can still be referenced by another instance's per-instance state
-    // as an integer id (e.g. linked-list pointers, owner ids, chain heads, etc.). Rewrite any
-    // stale id equal to the dying instance back to -4.
+// Tiny open-addressed hash sets (linear probing, max load 0.5) for the dead-ref
+// sweep below. They replace the previous sort-everything-then-bsearch design:
+// no per-sweep qsorts and no indirect comparator calls in the hot lookup loop.
+// Matching semantics are identical (exact int32 / range-checked int64 / exact
+// real-bits matches), so sweep results are unchanged.
+#define DEAD_REF_SET_STACK_CAP 512
 
-    // This is probably not very optimal as it loops through every single instance and every single
-    // selfVar slot, but it doesn't happen too often so maybe it should be okay?
-    // Another option would be to keep a reverse lookup table of instance ids to instances that reference them,
-    // but that would be more memory and complexity overhead.
+typedef struct {
+    int32_t* ids;
+    uint8_t* idOccupied;
+    uint64_t* bits;
+    uint8_t* bitsOccupied;
+    uint32_t mask;
+} DeadRefSet;
 
-    int32_t destroyedInstanceId = destroyedInst->instanceId;
+static inline uint32_t deadRefHash32(uint32_t x) {
+    return x * 0x9E3779B9u;
+}
+
+static inline uint32_t deadRefHashBits(uint64_t b) {
+    return (uint32_t)(b ^ (b >> 33)) * 0x9E3779B9u;
+}
+
+static void deadRefSetInsert(DeadRefSet* set, int32_t id, uint64_t bits) {
+    uint32_t idx = deadRefHash32((uint32_t)id) & set->mask;
+    while (set->idOccupied[idx]) {
+        if (set->ids[idx] == id) return; // already present (defensive; destroys are idempotent)
+        idx = (idx + 1) & set->mask;
+    }
+    set->idOccupied[idx] = 1;
+    set->ids[idx] = id;
+    uint32_t bidx = deadRefHashBits(bits) & set->mask;
+    while (set->bitsOccupied[bidx]) {
+        if (set->bits[bidx] == bits) return;
+        bidx = (bidx + 1) & set->mask;
+    }
+    set->bitsOccupied[bidx] = 1;
+    set->bits[bidx] = bits;
+}
+
+static inline bool deadRefSetContainsId(const DeadRefSet* set, int32_t id) {
+    uint32_t idx = deadRefHash32((uint32_t)id) & set->mask;
+    while (set->idOccupied[idx]) {
+        if (set->ids[idx] == id) return true;
+        idx = (idx + 1) & set->mask;
+    }
+    return false;
+}
+
+static inline bool deadRefSetContainsBits(const DeadRefSet* set, uint64_t bits) {
+    uint32_t idx = deadRefHashBits(bits) & set->mask;
+    while (set->bitsOccupied[idx]) {
+        if (set->bits[idx] == bits) return true;
+        idx = (idx + 1) & set->mask;
+    }
+    return false;
+}
+
+// Rewrite selfVar slots that still hold ids of instances destroyed since the
+// last sweep back to noone (-4). A destroyed instance can still be referenced
+// by another instance's per-instance state as an integer id (e.g. linked-list
+// pointers, owner ids, chain heads, etc.).
+//
+// This runs once per cleanup instead of once per destroy. The per-destroy scan
+// was O(instances*slots) each time, so a spell clear destroying hundreds of
+// bullets in one frame paid hundreds of full scans (measured 10+ ms host CPU
+// spikes); the sweep pays one scan per frame regardless of death count.
+//
+// Matching semantics are unchanged: int32 slots compare directly, int64 slots
+// compare after an exact range check, and real slots match bit-exactly against
+// (GMLReal)id, which is precisely IEEE 754 equality for these operands.
+static void Runner_sweepDeadInstanceRefs(Runner* runner) {
+    if (runner == nullptr) return;
+    int32_t deadCount = (int32_t)arrlen(runner->deadRefSweepPending);
+    if (deadCount <= 0) return;
+
+    // Capacity is a power of two holding every dead id at load <= 0.5, so every
+    // probe chain terminates at an empty slot. Stack for typical per-frame death
+    // counts; single heap block past that.
+    uint32_t cap = 8;
+    while (cap < (uint32_t)deadCount * 2u) cap <<= 1;
+
+    int32_t stackIds[DEAD_REF_SET_STACK_CAP];
+    uint8_t stackIdOccupied[DEAD_REF_SET_STACK_CAP];
+    uint64_t stackBits[DEAD_REF_SET_STACK_CAP];
+    uint8_t stackBitsOccupied[DEAD_REF_SET_STACK_CAP];
+
+    DeadRefSet set;
+    uint8_t* heapBlock = nullptr;
+    if (cap <= DEAD_REF_SET_STACK_CAP) {
+        set.ids = stackIds;
+        set.idOccupied = stackIdOccupied;
+        set.bits = stackBits;
+        set.bitsOccupied = stackBitsOccupied;
+    } else {
+        heapBlock = (uint8_t*)safeMalloc((size_t)cap * (sizeof(uint64_t) + sizeof(int32_t) + 2 * sizeof(uint8_t)));
+        set.bits = (uint64_t*)heapBlock;
+        set.ids = (int32_t*)(set.bits + cap);
+        set.idOccupied = (uint8_t*)(set.ids + cap);
+        set.bitsOccupied = set.idOccupied + cap;
+    }
+    set.mask = cap - 1;
+    memset(set.idOccupied, 0, cap);
+    memset(set.bitsOccupied, 0, cap);
+
+    repeat(deadCount, i) {
+        int32_t id = runner->deadRefSweepPending[i];
+        deadRefSetInsert(&set, id, gmlRealMatchBits((GMLReal)id));
+    }
+
     int32_t count = (int32_t) arrlen(runner->instances);
     for (int32_t i = 0; i < count; i++) {
         Instance* inst = runner->instances[i];
         if (inst == nullptr || !inst->active || inst->destroyed || inst->objectIndex < 0) continue;
+        if (inst->selfVars.count == 0) continue;
         repeat(inst->selfVars.capacity, slotIndex) {
             IntRValueEntry* entry = &inst->selfVars.entries[slotIndex];
             if (entry->key == INT_RVALUE_HASHMAP_EMPTY_KEY) continue;
 
             uint8_t vtype = entry->value.type;
-            if (
-                (vtype == RVALUE_INT32 && entry->value.int32 == destroyedInstanceId) ||
+            bool dead = false;
+            if (vtype == RVALUE_INT32) {
+                dead = deadRefSetContainsId(&set, entry->value.int32);
+            }
 #ifndef NO_RVALUE_INT64
-                (vtype == RVALUE_INT64 && entry->value.int64 == destroyedInstanceId) ||
+            else if (vtype == RVALUE_INT64) {
+                int64_t v = entry->value.int64;
+                if (v >= (int64_t)INT32_MIN && v <= (int64_t)INT32_MAX) {
+                    dead = deadRefSetContainsId(&set, (int32_t)v);
+                }
+            }
 #endif
-                (vtype == RVALUE_REAL && entry->value.real == (GMLReal) destroyedInstanceId)
-            ) {
+            else if (vtype == RVALUE_REAL) {
+                dead = deadRefSetContainsBits(&set, gmlRealMatchBits(entry->value.real));
+            }
+            if (dead) {
                 entry->value = RValue_makeInt32(INSTANCE_NOONE);
             }
         }
     }
+    if (heapBlock != nullptr) free(heapBlock);
+    arrsetlen(runner->deadRefSweepPending, 0);
 }
 
 void Runner_destroyInstance(MAYBE_UNUSED Runner* runner, Instance* inst, bool runDestroyEvent) {
@@ -2680,8 +2910,10 @@ void Runner_destroyInstance(MAYBE_UNUSED Runner* runner, Instance* inst, bool ru
     inst->active = false;
 
     // Any selfVars that still hold the destroyed instance's id must be invalidated back to
-    // noone (-4) before the instance is fully reclaimed.
-    Runner_clearStaleInstanceReferencesToInstance(runner, inst);
+    // noone (-4) before the instance is fully reclaimed. Queued for the batched
+    // sweep in Runner_cleanupDestroyedInstances: invalidating eagerly here cost
+    // a full instances*slots scan per destroy.
+    arrput(runner->deadRefSweepPending, inst->instanceId);
 
 #ifdef ENABLE_VM_TRACING
     GameObject* gameObject = &runner->dataWin->objt.objects[inst->objectIndex];
@@ -2796,6 +3028,9 @@ static void Runner_sweepDeadStructs(Runner* runner) {
 }
 
 void Runner_cleanupDestroyedInstances(Runner* runner) {
+    // Invalidate stale selfVar references to everything that died since the
+    // last cleanup in a single pass (see Runner_sweepDeadInstanceRefs).
+    Runner_sweepDeadInstanceRefs(runner);
     int32_t count = (int32_t) arrlen(runner->instances);
     int32_t writeIdx = 0;
     repeat(count, i) {
@@ -3398,11 +3633,11 @@ static void dispatchCollisionEvents(Runner* runner) {
 
                     // Compute bboxes
                     if (selfDirty) {
-                        bboxSelf = Collision_computeBBox(runner, self);
+                        bboxSelf = Collision_getBBox(runner, self);
                         sprSelf = Collision_getSprite(dataWin, self);
                         selfDirty = false;
                     }
-                    InstanceBBox bboxOther = Collision_computeBBox(runner, other);
+                    InstanceBBox bboxOther = Collision_getBBox(runner, other);
 
 #ifdef ENABLE_VM_TRACING
                     bool traceThisPair = shouldTraceCollisionPair(runner->vmContext, dataWin, self, other);
@@ -3501,8 +3736,8 @@ static void dispatchCollisionEvents(Runner* runner) {
                         // When we are in collision compatibility mode, we need to recheck if the player is STILL colliding after we have moved them
                         // If they are, we revert the collision
                         if (runner->collisionCompatibilityMode) {
-                            InstanceBBox bboxSelf2 = Collision_computeBBox(runner, self);
-                            InstanceBBox bboxOther2 = Collision_computeBBox(runner, other);
+                            InstanceBBox bboxSelf2 = Collision_getBBox(runner, self);
+                            InstanceBBox bboxOther2 = Collision_getBBox(runner, other);
                             if (bboxSelf2.valid && bboxOther2.valid) {
                                 bool aabbMiss2 = bboxSelf2.left >= bboxOther2.right || bboxOther2.left >= bboxSelf2.right || bboxSelf2.top >= bboxOther2.bottom || bboxOther2.top >= bboxSelf2.bottom;
                                 bool stillColliding = false;
@@ -3645,7 +3880,7 @@ static void dispatchOutsideRoomEvents(Runner* runner) {
             if (!inst->active) continue;
 
             bool outside;
-            InstanceBBox bbox = Collision_computeBBox(runner, inst);
+            InstanceBBox bbox = Collision_getBBox(runner, inst);
             if (bbox.valid) {
                 outside = (0 > bbox.right || bbox.left > roomWidth || 0 > bbox.bottom || bbox.top > roomHeight);
             } else {
@@ -3705,7 +3940,7 @@ static void dispatchOutsideViewEvents(Runner* runner, int32_t viewIndex) {
             if (!inst->active) continue;
 
             bool outside;
-            InstanceBBox bbox = Collision_computeBBox(runner, inst);
+            InstanceBBox bbox = Collision_getBBox(runner, inst);
 
             if (bbox.valid) {
                 outside = (viewLeft > bbox.right || bbox.left > viewRight || 0 > bbox.bottom || bbox.top > viewBottom);
@@ -4051,6 +4286,7 @@ void Runner_step(Runner* runner) {
 #endif
 
     // Execute Begin Step for all instances
+
     Runner_executeEventForAll(runner, EVENT_STEP, STEP_BEGIN);
 
     // Process alarms. Outer loop is over alarm slots (matching the native runner's HandleAlarm), and for each slot we walk only the objects in the event table's bySlot range and only those objects' exact instance buckets. Idle instances are further skipped via activeAlarmMask.
@@ -4414,6 +4650,8 @@ void Runner_beginFrame(
 // ===[ State Dump ]===
 
 void Runner_dumpState(Runner* runner) {
+    // Flush pending invalidations so dumps always reflect post-sweep state.
+    Runner_sweepDeadInstanceRefs(runner);
     DataWin* dataWin = runner->dataWin;
     int32_t instanceCount = (int32_t) arrlen(runner->instances);
 
@@ -4585,6 +4823,8 @@ static void writeRValueJson(JsonWriter* w, RValue val) {
 }
 
 char* Runner_dumpStateJson(Runner* runner) {
+    // Flush pending invalidations so dumps always reflect post-sweep state.
+    Runner_sweepDeadInstanceRefs(runner);
     DataWin* dataWin = runner->dataWin;
     int32_t instanceCount = (int32_t) arrlen(runner->instances);
 
@@ -4811,6 +5051,9 @@ void Runner_free(Runner* runner) {
     runner->pendingActiveStateInstances = nullptr;
     arrfree(runner->eventDispatchInstances);
     runner->eventDispatchInstances = nullptr;
+    free(runner->drawEventCache);
+    runner->drawEventCache = nullptr;
+    runner->drawEventCacheObjects = 0;
     ResolvedEventTable_free(&runner->eventTable);
     EventSlotMap_destroy(&runner->eventSlotMap);
     shfree(runner->assetsByName);

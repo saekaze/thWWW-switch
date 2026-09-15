@@ -95,6 +95,7 @@ typedef struct {
     bool printDeclaredFunctions;
     bool printUnknownFunctions;
     int exitAtFrame;
+    bool synthBench; // --synth-bench: deterministic dense gameplay field for host-side A/B (desktop CLI only)
 #ifdef ENABLE_VM_TRACING
     int traceBytecodeAfterFrame;
 #endif

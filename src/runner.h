@@ -268,6 +268,26 @@ typedef struct {
     TileLayerState value;
 } TileLayerMapEntry;
 
+// Total sort key for the depth-sorted draw list. Unique per entry (instance, tile,
+// layer and particle-system ids are unique within their type), so any correct sort
+// over it produces the same order.
+typedef struct {
+    int32_t sortBand;
+    int32_t depth;
+    int32_t type;
+    int32_t order;
+} DrawKey;
+
+// Number of draw subtypes covered by Runner.drawEventCache (DRAW_NORMAL + the 7 fireDrawSubtype passes).
+#define DRAW_CACHE_SUBTYPES 8
+
+// One cached draw-event resolution: the CODE chunk handler id (or -1) plus the
+// parent-chain owner objectIndex (-1 when not found). Same pair ResolvedEventTable_lookup returns.
+typedef struct {
+    int32_t codeId;
+    int32_t owner;
+} DrawEventCacheEntry;
+
 // A single entry in the depth-sorted draw list. Cached on Runner and rebuilt lazily based on Runner.drawableListStructureDirty / drawableListSortDirty.
 // Filtering on instance->active/visible and runtimeLayer->visible happens at draw time so toggling those does not require invalidating the cache.
 typedef enum { DRAWABLE_TILE, DRAWABLE_INSTANCE, DRAWABLE_LAYER, DRAWABLE_PARTICLE_SYSTEM } DrawableType;
@@ -278,6 +298,7 @@ typedef struct {
     // Compatibility sort band. Normally zero; thWWW's negative-depth stage
     // backgrounds use band zero while non-negative gameplay uses band one.
     int32_t sortBand;
+    DrawKey sortKey; // Cached drawableKey(): comparator input, refreshed with depth/sortBand.
     union {
         Instance* instance;
         int32_t tileIndex;
@@ -598,6 +619,12 @@ struct Runner {
     EventSlotMap eventSlotMap;
     // Precomputed per-object and per-slot CSR tables of resolved event handlers. Replaces the per-dispatch parent-chain walk in findEventCodeIdAndOwner.
     ResolvedEventTable eventTable;
+    // Precomputed per-(object, draw-subtype) event resolution: [objectIndex * DRAW_CACHE_SUBTYPES + col].
+    // The event table is built once at load and never mutated, so draw dispatch (which fires up to 8
+    // subtype passes over every drawable each frame) reads the cached (codeId, owner) instead of
+    // re-scanning the CSR range per drawable. Column order matches kDrawCacheSubtypes[] in runner.c.
+    DrawEventCacheEntry* drawEventCache;
+    uint32_t drawEventCacheObjects;
     // Precomputed assets map.
     AssetsByNameEntry* assetsByName;
     // For each event type, the deduplicated list of object indices that respond to ANY subtype of that event (including via inheritance). Derived from the event table; used by collision dispatch to skip non-collision objects in the outer loop.
@@ -623,6 +650,12 @@ struct Runner {
     int32_t eventExecutionDepth;
     SpatialGrid* spatialGrid;
     uint32_t collisionQueryCounter;
+    // Batched stale-reference sweep: ids of instances destroyed since the last
+    // sweep. Rewriting referrers on every destroy costs a full
+    // instances*slots scan per destroy; sweeping once per cleanup costs one
+    // scan per frame no matter how many instances died (spell clears destroy
+    // hundreds in a single frame).
+    int32_t* deadRefSweepPending;
     int32_t pendingRoom;  // -1 = none
     bool gameStartFired;
     int frameCount;

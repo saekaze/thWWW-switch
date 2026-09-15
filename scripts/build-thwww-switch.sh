@@ -6,6 +6,9 @@ SOURCE_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 PROJECT_ROOT="${THWWW_SWITCH_ROOT:-$SOURCE_DIR}"
 BUILD_DIR="${THWWW_BUILD_DIR:-${TMPDIR:-/tmp}/thwww-switch-build}"
 RELEASE_DIR="${THWWW_RELEASE_DIR:-$PROJECT_ROOT/release}"
+# Optional extra CMake configure arguments, e.g. for instrumented (profiler) builds:
+#   THWWW_EXTRA_CMAKE_ARGS="-DTHWWW_SWITCH_PROFLOG=ON -DENABLE_VM_GML_PROFILER=ON"
+EXTRA_CMAKE_ARGS="${THWWW_EXTRA_CMAKE_ARGS:-}"
 
 if [[ -z "${DEVKITPRO:-}" && -d /opt/devkitpro ]]; then
     export DEVKITPRO=/opt/devkitpro
@@ -47,7 +50,8 @@ mkdir -p -- "$BUILD_DIR" "$RELEASE_DIR/docs"
     -DENABLE_WAD17=ON \
     -DWERROR=ON \
     -DBUTTERSCOTCH_COMMIT_HASH="$COMMIT_HASH" \
-    -DBUTTERSCOTCH_COMMIT_DATE="$COMMIT_DATE"
+    -DBUTTERSCOTCH_COMMIT_DATE="$COMMIT_DATE" \
+    ${EXTRA_CMAKE_ARGS}
 
 cmake --build "$BUILD_DIR" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
 

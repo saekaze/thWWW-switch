@@ -19,11 +19,6 @@ static inline bool Collision_matchesTarget(DataWin* dataWin, Instance* inst, int
     return VM_isObjectOrDescendant(dataWin, inst->objectIndex, target);
 }
 
-typedef struct {
-    GMLReal left, right, top, bottom;
-    bool valid;
-} InstanceBBox;
-
 // Returns the collision sprite for an instance (mask sprite if set, else display sprite)
 static inline Sprite* Collision_getSprite(DataWin* dataWin, Instance* inst) {
     int32_t sprIdx = (inst->maskIndex >= 0) ? inst->maskIndex : inst->spriteIndex;
@@ -106,6 +101,37 @@ static inline InstanceBBox Collision_computeBBox(Runner* runner, Instance* inst)
     return ret;
 }
 
+// Memoized Collision_computeBBox. Bit-exact: a hit requires the invalidation flag to be set,
+// all bbox inputs to be bitwise identical, and the sprite's bbox generation to match.
+static inline InstanceBBox Collision_getBBox(Runner* runner, Instance* inst) {
+    if (inst->cachedBBox.valid) {
+        int32_t sprIdx = (inst->maskIndex >= 0) ? inst->maskIndex : inst->spriteIndex;
+        if (inst->cachedBBoxX == inst->x && inst->cachedBBoxY == inst->y &&
+            inst->cachedBBoxXscale == inst->imageXscale && inst->cachedBBoxYscale == inst->imageYscale &&
+            inst->cachedBBoxAngle == inst->imageAngle && inst->cachedBBoxSprite == sprIdx) {
+            Sprite* spr = (0 <= sprIdx && (uint32_t) sprIdx < runner->dataWin->sprt.count)
+                ? &runner->dataWin->sprt.sprites[sprIdx] : nullptr;
+            if (((spr != nullptr) ? spr->bboxGeneration : 0u) == inst->cachedBBoxSpriteGen)
+                return inst->cachedBBox;
+        }
+    }
+    InstanceBBox fresh = Collision_computeBBox(runner, inst);
+    if (fresh.valid) {
+        int32_t sprIdx = (inst->maskIndex >= 0) ? inst->maskIndex : inst->spriteIndex;
+        Sprite* spr = (0 <= sprIdx && (uint32_t) sprIdx < runner->dataWin->sprt.count)
+            ? &runner->dataWin->sprt.sprites[sprIdx] : nullptr;
+        inst->cachedBBox = fresh;
+        inst->cachedBBoxX = inst->x;
+        inst->cachedBBoxY = inst->y;
+        inst->cachedBBoxXscale = inst->imageXscale;
+        inst->cachedBBoxYscale = inst->imageYscale;
+        inst->cachedBBoxAngle = inst->imageAngle;
+        inst->cachedBBoxSprite = sprIdx;
+        inst->cachedBBoxSpriteGen = (spr != nullptr) ? spr->bboxGeneration : 0u;
+    }
+    return fresh;
+}
+
 static inline bool Collision_hasFrameMasks(Sprite* sprite) {
     return sprite != nullptr && sprite->sepMasks == 1 && sprite->masks != nullptr && sprite->maskCount > 0;
 }
@@ -162,7 +188,7 @@ static inline bool Collision_obbNeedsSAT(Sprite* spr, Instance* inst) {
 }
 
 static inline bool Collision_rectOverlapsInstance(Runner* runner, Instance* inst, GMLReal rx1, GMLReal ry1, GMLReal rx2, GMLReal ry2) {
-    InstanceBBox bbox = Collision_computeBBox(runner, inst);
+    InstanceBBox bbox = Collision_getBBox(runner, inst);
     if (!bbox.valid) return false;
 
     if (rx1 >= bbox.right || bbox.left > rx2 || ry1 >= bbox.bottom || bbox.top > ry2) return false;
@@ -192,7 +218,7 @@ static inline bool Collision_rectOverlapsInstance(Runner* runner, Instance* inst
 
 // Tests whether a world point lies inside the instance's collision rect (margins, rotated/scaled). Cheaper and more correct than Collision_pointInInstance for sepMasks != 1, since point_in_instance bounds-checks against the full sprite texture rather than the bbox margins.
 static inline bool Collision_pointInsideInstanceBox(Runner* runner, Instance* inst, GMLReal px, GMLReal py) {
-    InstanceBBox bbox = Collision_computeBBox(runner, inst);
+    InstanceBBox bbox = Collision_getBBox(runner, inst);
     if (!bbox.valid) return false;
     if (bbox.left > px || px >= bbox.right || bbox.top > py || py >= bbox.bottom) return false;
 
@@ -207,7 +233,7 @@ static inline bool Collision_pointInsideInstanceBox(Runner* runner, Instance* in
 
 // Circle (cx, cy, radius) vs instance collision rect. Falls back to circle-vs-AABB when the instance isn't a rotated sepMasks==2 sprite.
 static inline bool Collision_circleOverlapsInstance(Runner* runner, Instance* inst, GMLReal cx, GMLReal cy, GMLReal radius) {
-    InstanceBBox bbox = Collision_computeBBox(runner, inst);
+    InstanceBBox bbox = Collision_getBBox(runner, inst);
     if (!bbox.valid) return false;
     GMLReal rSq = radius * radius;
 
@@ -258,7 +284,7 @@ static inline bool Collision_pointInEllipse(GMLReal x1, GMLReal y1, GMLReal x2, 
 // (zero width/height) fallback to the rectangle test, nearest-corner PtInEllipse rejection,
 // and ellipse-vs-OBB SAT for rotated sepMasks==2 sprites.
 static inline bool Collision_ellipseOverlapsInstance(Runner* runner, Instance* inst, GMLReal x1, GMLReal y1, GMLReal x2, GMLReal y2) {
-    InstanceBBox bbox = Collision_computeBBox(runner, inst);
+    InstanceBBox bbox = Collision_getBBox(runner, inst);
     if (!bbox.valid) return false;
 
     // Native rounds the ellipse corners in compatibility mode, before computing the centre/radii.
@@ -362,7 +388,7 @@ static inline bool Collision_segmentVsAARect(GMLReal x1, GMLReal y1, GMLReal x2,
 
 // Line segment (x1,y1)-(x2,y2) vs instance collision rect.
 static inline bool Collision_lineOverlapsInstance(Runner* runner, Instance* inst, GMLReal x1, GMLReal y1, GMLReal x2, GMLReal y2) {
-    InstanceBBox bbox = Collision_computeBBox(runner, inst);
+    InstanceBBox bbox = Collision_getBBox(runner, inst);
     if (!bbox.valid) return false;
 
     // Epsilon from GameMaker-HTML5, we apply it because the BBox is "exclusive" (outside of the sprite) but we need to put the right/bottom INSIDE of the sprite
@@ -429,6 +455,60 @@ static inline bool Collision_pointInInstance(Sprite* spr, Instance* inst, GMLRea
         return (mask[my * bytesPerRow + (mx >> 3)] & (1 << (7 - (mx & 7)))) != 0;
     }
 
+    return true;
+}
+
+// Precomputed per-side state for the fast pixel-walk path: everything the per-pixel
+// test needs that is loop-invariant (sprite dims, origin, selected mask row) is
+// hoisted here, so the per-pixel test is a few flops plus a bit test with no
+// divisions, trig, or modulo. Bit-exact mirror of Collision_pointInInstance for the
+// unrotated, unit-scale case (x / 1.0 == x in IEEE 754, and the rotation block is
+// skipped under the same |angle| <= 0.0001 condition).
+typedef struct {
+    GMLReal ix, iy; // instance origin (world)
+    GMLReal originX, originY; // sprite origin
+    int32_t width, height; // full-texture bounds
+    bool masked;
+    uint8_t* mask; // selected frame mask (valid iff masked)
+    uint32_t bytesPerRow;
+    int32_t maskW, maskH, maskOX, maskOY;
+} CollisionPointTester;
+
+static inline void Collision_makePointTester(CollisionPointTester* t, Sprite* spr, Instance* inst, bool precise) {
+    t->ix = inst->x;
+    t->iy = inst->y;
+    t->originX = (GMLReal) spr->originX;
+    t->originY = (GMLReal) spr->originY;
+    t->width = (int32_t) spr->width;
+    t->height = (int32_t) spr->height;
+    t->masked = precise;
+    if (precise) {
+        uint32_t frameIdx = ((uint32_t) inst->imageIndex) % spr->maskCount;
+        t->mask = spr->masks[frameIdx];
+        t->bytesPerRow = (spr->maskWidth + 7) / 8;
+        t->maskW = (int32_t) spr->maskWidth;
+        t->maskH = (int32_t) spr->maskHeight;
+        t->maskOX = spr->maskOffsetX;
+        t->maskOY = spr->maskOffsetY;
+    } else {
+        t->mask = nullptr;
+        t->bytesPerRow = 0;
+        t->maskW = t->maskH = t->maskOX = t->maskOY = 0;
+    }
+}
+
+static inline bool Collision_testPointFast(const CollisionPointTester* t, GMLReal wpx, GMLReal wpy) {
+    GMLReal localX = (wpx - t->ix) + t->originX;
+    GMLReal localY = (wpy - t->iy) + t->originY;
+    int32_t ix = (int32_t) localX;
+    int32_t iy = (int32_t) localY;
+    if (0 > ix || 0 > iy || ix >= t->width || iy >= t->height) return false;
+    if (t->masked) {
+        int32_t mx = ix - t->maskOX;
+        int32_t my = iy - t->maskOY;
+        if (0 > mx || 0 > my || mx >= t->maskW || my >= t->maskH) return false;
+        return (t->mask[my * t->bytesPerRow + (mx >> 3)] & (1 << (7 - (mx & 7)))) != 0;
+    }
     return true;
 }
 
@@ -522,6 +602,31 @@ static inline bool Collision_instancesOverlapPrecise(Runner* runner, Instance* a
         startY = (int32_t) GMLReal_floor(iTop);
         endY   = (int32_t) GMLReal_ceil(iBottom);
         sampleOffset = 0.5;
+    }
+
+    // A degenerate scale makes every per-pixel test on that side false, so the overlap is empty.
+    if (0.0001 > GMLReal_fabs(a->imageXscale) || 0.0001 > GMLReal_fabs(a->imageYscale)
+            || 0.0001 > GMLReal_fabs(b->imageXscale) || 0.0001 > GMLReal_fabs(b->imageYscale))
+        return false;
+
+    // Fast pixel walk: both sides unrotated and unit-scaled (the overwhelmingly common
+    // danmaku case). Hoists the per-pixel divisions, trig, and mask-frame modulo.
+    if (GMLReal_fabs(a->imageAngle) <= 0.0001 && a->imageXscale == 1.0 && a->imageYscale == 1.0
+            && GMLReal_fabs(b->imageAngle) <= 0.0001 && b->imageXscale == 1.0 && b->imageYscale == 1.0) {
+        CollisionPointTester tA, tB;
+        Collision_makePointTester(&tA, sprA, a, preciseA);
+        Collision_makePointTester(&tB, sprB, b, preciseB);
+        for (int32_t py = startY; (compatMode ? py <= endY : py < endY); py++) {
+            for (int32_t px = startX; (compatMode ? px <= endX : px < endX); px++) {
+                GMLReal wpx = (GMLReal) px + sampleOffset;
+                GMLReal wpy = (GMLReal) py + sampleOffset;
+
+                if (!Collision_testPointFast(&tA, wpx, wpy)) continue;
+                if (!Collision_testPointFast(&tB, wpx, wpy)) continue;
+                return true;
+            }
+        }
+        return false;
     }
 
     for (int32_t py = startY; (compatMode ? py <= endY : py < endY); py++) {

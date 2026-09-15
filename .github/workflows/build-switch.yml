@@ -1,0 +1,63 @@
+name: Build Switch NRO
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host build tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq cmake ninja-build git
+
+      - name: Install Switch portlibs
+        run: |
+          dkp-pacman -S --needed --noconfirm switch-sdl2 switch-openal-soft switch-zlib switch-bzip2
+
+      - name: Build
+        env:
+          DEVKITPRO: /opt/devkitpro
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          chmod +x scripts/build-thwww-switch.sh
+          ./scripts/build-thwww-switch.sh
+
+      - name: Show result
+        run: ls -lh release/thwww.nro && cat release/SHA256SUMS
+
+      - name: Upload NRO
+        uses: actions/upload-artifact@v4
+        with:
+          name: thwww-switch
+          path: |
+            release/thwww.nro
+            release/thwww.nacp
+            release/SHA256SUMS
+          if-no-files-found: error
+
+      # Tagged pushes additionally publish the NRO as a release asset.
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/thwww.nro
+            release/thwww.nacp
+            release/SHA256SUMS
+          body_path: docs/RELEASE-NOTES.md
+          fail_on_unmatched_files: true

@@ -102,6 +102,7 @@ static void printUsage(const char *argv0) {
         "    --always-log-stubbed-functions         - Always log stubbed function calls instead of once per script\n"
 #endif
         "    --exit-at-frame <frame>                - Exit at the specified frame\n"
+        "    --synth-bench                          - Jump to room_gp with a dense deterministic bullet+shot field (host A/B)\n"
 #ifdef ENABLE_VM_TRACING
         "    --trace-bytecode-after-frame <frame>   - Delay stack and opcode tracing until the specified frame\n"
 #endif
@@ -172,6 +173,7 @@ static void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) 
         {"always-log-stubbed-functions", no_argument, nullptr, 'Y'},
 #endif
         {"exit-at-frame", required_argument, nullptr, 'x'},
+        {"synth-bench", no_argument, nullptr, 1004},
 #ifdef ENABLE_VM_TRACING
         {"trace-bytecode-after-frame", required_argument, nullptr, 'F'},
 #endif
@@ -209,6 +211,7 @@ static void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) 
     args->screenshotFrames = nullptr;
 #endif
     args->exitAtFrame = -1;
+    args->synthBench = false;
 #ifdef ENABLE_VM_TRACING
     args->traceBytecodeAfterFrame = 0;
 #endif
@@ -338,6 +341,10 @@ static void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) 
                     exit(1);
                 }
                 args->exitAtFrame = frame;
+                break;
+            }
+            case 1004: {
+                args->synthBench = true;
                 break;
             }
 #ifdef ENABLE_VM_TRACING

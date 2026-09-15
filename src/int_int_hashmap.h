@@ -30,9 +30,33 @@ typedef struct {
 // Releases the entries buffer. Safe to call on a zero-initialized map.
 void IntIntHashMap_free(IntIntHashMap* map);
 
-// Inserts (key, count) and returns the new value. Caller must guarantee key is not already present (used internally by getOrInsertSequential after the probe loop has confirmed absence).
-// Out-of-line because it can grow the table.
-uint32_t IntIntHashMap_getOrInsertSequential(IntIntHashMap* map, int32_t key);
+// Grows the table. Out-of-line; called by the inline below on the rare resize path.
+void IntIntHashMap_grow(IntIntHashMap* map);
+
+// Returns the existing value for key, or inserts (key, count) and returns the new value.
+// Inline: every local-variable access in WAD17+ games goes through here.
+static inline uint32_t IntIntHashMap_getOrInsertSequential(IntIntHashMap* map, int32_t key) {
+    requireMessage(key != INT_INT_HASHMAP_EMPTY_KEY, "IntIntHashMap_getOrInsertSequential: key -1 collides with the empty-slot sentinel");
+
+    // Resize before probing so we always find an empty slot. Threshold: load factor 0.75.
+    if ((map->count + 1) * 4 > map->capacity * 3) {
+        IntIntHashMap_grow(map);
+    }
+
+    uint32_t idx = ((uint32_t) key * 0x9E3779B9u) & map->mask;
+    while (true) {
+        int32_t slotKey = map->entries[idx].key;
+        if (slotKey == key) return map->entries[idx].value;
+        if (slotKey == INT_INT_HASHMAP_EMPTY_KEY) {
+            uint32_t newSlot = map->count;
+            map->entries[idx].key = key;
+            map->entries[idx].value = newSlot;
+            map->count = newSlot + 1;
+            return newSlot;
+        }
+        idx = (idx + 1) & map->mask;
+    }
+}
 
 // Returns the number of occupied slots.
 static inline uint32_t IntIntHashMap_count(const IntIntHashMap* map) {

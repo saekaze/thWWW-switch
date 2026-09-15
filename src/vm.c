@@ -7,6 +7,7 @@
 #include "wad_versions.h"
 #include "profiler.h"
 #include "string_builder.h"
+#include "gettime.h"
 
 #include "stdio_compat.h"
 #include <stdlib.h>
@@ -510,8 +511,14 @@ static inline bool tryFastVarRead(VMContext* ctx, int32_t instanceType, Variable
             Instance* inst = (Instance*) ctx->currentInstance;
             if (inst == nullptr) return false;
             RValue* slot = IntRValueHashMap_findSlot(&inst->selfVars, varDef->varID);
-            if (slot == nullptr)
-                return false;
+            if (slot == nullptr) {
+                // Missing slots read as undefined; only constructor structs may inherit the var from a static struct (slow path).
+                if (inst->objectIndex == STRUCT_OBJECT_INDEX && ctx->staticStructs != nullptr
+                        && inst->constructorCodeIndex >= 0 && (uint32_t) inst->constructorCodeIndex < ctx->dataWin->code.count)
+                    return false;
+                *out = RValue_makeUndefined();
+                return true;
+            }
             *out = *slot;
             out->ownsReference = false;
             return true;
@@ -526,8 +533,14 @@ static inline bool tryFastVarRead(VMContext* ctx, int32_t instanceType, Variable
         case INSTANCE_GLOBAL: {
             Instance* inst = (Instance*) ctx->globalScopeInstance;
             RValue* slot = IntRValueHashMap_findSlot(&inst->selfVars, varDef->varID);
-            if (slot == nullptr)
-                return false;
+            if (slot == nullptr) {
+                // Missing slots read as undefined (the slow path returns before the shot_down override for these too).
+                if (inst->objectIndex == STRUCT_OBJECT_INDEX && ctx->staticStructs != nullptr
+                        && inst->constructorCodeIndex >= 0 && (uint32_t) inst->constructorCodeIndex < ctx->dataWin->code.count)
+                    return false;
+                *out = RValue_makeUndefined();
+                return true;
+            }
 #ifdef __SWITCH__
             // thWWW advances dialogue repeatedly from global.shot_down. Feed
             // that one dialogue read from the dedicated physical R slot so R
@@ -549,10 +562,102 @@ static inline bool tryFastVarRead(VMContext* ctx, int32_t instanceType, Variable
             Instance* inst = (Instance*) ctx->otherInstance;
             if (inst == nullptr) return false;
             RValue* slot = IntRValueHashMap_findSlot(&inst->selfVars, varDef->varID);
-            if (slot == nullptr)
-                return false;
+            if (slot == nullptr) {
+                // Missing slots read as undefined; only constructor structs may inherit the var from a static struct (slow path).
+                if (inst->objectIndex == STRUCT_OBJECT_INDEX && ctx->staticStructs != nullptr
+                        && inst->constructorCodeIndex >= 0 && (uint32_t) inst->constructorCodeIndex < ctx->dataWin->code.count)
+                    return false;
+                *out = RValue_makeUndefined();
+                return true;
+            }
             *out = *slot;
             out->ownsReference = false;
+            return true;
+        }
+        case INSTANCE_ARG: {
+            // BC17 script-argument reads (argument0..15, argument_count). Only valid on WAD17+;
+            // anything else mirrors the slow path exactly (a bare `argument` carries no index under
+            // VARTYPE_NORMAL so the slow path yields undefined for it; unknown ids warn on the slow path).
+            if (!IS_WAD17_OR_HIGHER(ctx)) return false;
+            int16_t bid = varDef->builtinVarId;
+            if (bid == BUILTIN_VAR_ARGUMENT_COUNT) {
+                *out = RValue_makeReal((GMLReal) ctx->scriptArgCount);
+                return true;
+            }
+            if (bid >= BUILTIN_VAR_ARGUMENT0 && BUILTIN_VAR_ARGUMENT15 >= bid) {
+                int32_t argIndex = (int32_t) (bid - BUILTIN_VAR_ARGUMENT0);
+                if (ctx->scriptArgs != nullptr && ctx->scriptArgCount > argIndex) {
+                    *out = ctx->scriptArgs[argIndex];
+                    out->ownsReference = false;
+                } else {
+                    *out = RValue_makeUndefined();
+                }
+                return true;
+            }
+            if (bid == BUILTIN_VAR_ARGUMENT) {
+                *out = RValue_makeUndefined();
+                return true;
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+// Fast path for built-in variable reads (x, y, speed, direction, ...) with VARTYPE_NORMAL on SELF/OTHER.
+// Skips the handlePush/resolveVariableRead/popArrayAccess chain and calls the builtin getter directly.
+// Returns false for anything needing the slow path. Struct targets always use the slow path because
+// they may shadow builtins with dynamic fields (and the global scope instance is a struct).
+static inline bool tryFastBuiltinRead(VMContext* ctx, int32_t instanceType, Variable* varDef, RValue* out) {
+    Instance* target;
+    if (instanceType == INSTANCE_SELF) {
+        target = (Instance*) ctx->currentInstance;
+    } else if (instanceType == INSTANCE_OTHER) {
+        target = (Instance*) ctx->otherInstance;
+        if (target == nullptr) target = (Instance*) ctx->currentInstance;
+    } else {
+        return false;
+    }
+    if (target != nullptr && target->objectIndex == STRUCT_OBJECT_INDEX) return false;
+    *out = VMBuiltins_getVariable(ctx, target, varDef->builtinVarId, varDef->name, -1);
+    return true;
+}
+
+// Fast path for built-in variable writes with VARTYPE_NORMAL on SELF/OTHER/GLOBAL.
+// NOTE: the slow path routes GLOBAL builtin writes at the current instance (no globalScope
+// redirect there), so this mirrors that exactly. Like the slow path, val is only borrowed.
+static inline bool tryFastBuiltinWrite(VMContext* ctx, int32_t instanceType, Variable* varDef, RValue val) {
+    Instance* target;
+    if (instanceType == INSTANCE_SELF || instanceType == INSTANCE_GLOBAL) {
+        target = (Instance*) ctx->currentInstance;
+    } else if (instanceType == INSTANCE_OTHER) {
+        target = (Instance*) ctx->otherInstance;
+        if (target == nullptr) target = (Instance*) ctx->currentInstance;
+    } else {
+        return false;
+    }
+    VMBuiltins_setVariable(ctx, target, varDef->builtinVarId, varDef->name, val, -1);
+    return true;
+}
+
+// Fast path for plain variable writes (x = v) with VARTYPE_NORMAL on SELF/LOCAL.
+// Mirrors the slow path's ownership exactly: SELF copies into the slot, so the
+// caller-owned val is freed; LOCAL steals val into localVars (no free). Consumes
+// val on success; returns false without touching it for anything needing the slow
+// path (null instance, other scopes, GLOBAL's Switch button remap, ...).
+static inline bool tryFastVarWrite(VMContext* ctx, int32_t instanceType, Variable* varDef, RValue val) {
+    switch (instanceType) {
+        case INSTANCE_SELF: {
+            Instance* inst = (Instance*) ctx->currentInstance;
+            if (inst == nullptr) return false;
+            Instance_setSelfVar(inst, varDef->varID, val);
+            RValue_free(&val);
+            return true;
+        }
+        case INSTANCE_LOCAL: {
+            uint32_t localSlot = resolveLocalSlot(ctx, varDef->varID);
+            require(ctx->localVarCount > localSlot);
+            RValue_writeIntoSlotStealingOwnershipOrCopying(&ctx->localVars[localSlot], val);
             return true;
         }
     }
@@ -684,7 +789,16 @@ void VM_writeToScriptArgsArrayElement(VMContext* ctx, int32_t writeIndex, int32_
 
 static RValue resolveVariableRead(VMContext* ctx, int32_t instanceType, uint32_t varRef) {
     Variable* varDef = resolveVarDef(ctx, varRef);
-    ArrayAccess access = popArrayAccess(ctx, varRef);
+    // VARTYPE_NORMAL carries no stack operands; skip the popArrayAccess call entirely for it.
+    ArrayAccess access;
+    if (((varRef >> 24) & 0xF8) == VARTYPE_NORMAL) {
+        access.arrayIndex = -1;
+        access.instanceType = 0;
+        access.isArray = false;
+        access.hasInstanceType = false;
+    } else {
+        access = popArrayAccess(ctx, varRef);
+    }
 
     // Use instance type from stack when available (VARTYPE_ARRAY / VARTYPE_STACKTOP)
     int32_t originalInstanceType = instanceType;
@@ -966,7 +1080,16 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
     }
 
     // The slow path is used for builtin vars, object/instance references (instanceType >= 0), INSTANCE_ARG/STACKTOP, and other miscellaneous things like if we get a nullptr above
-    ArrayAccess access = popArrayAccess(ctx, varRef);
+    // VARTYPE_NORMAL carries no stack operands; skip the popArrayAccess call entirely for it.
+    ArrayAccess access;
+    if (((varRef >> 24) & 0xF8) == VARTYPE_NORMAL) {
+        access.arrayIndex = -1;
+        access.instanceType = 0;
+        access.isArray = false;
+        access.hasInstanceType = false;
+    } else {
+        access = popArrayAccess(ctx, varRef);
+    }
 
     // Use instance type from stack when available (VARTYPE_ARRAY / VARTYPE_STACKTOP)
     int32_t originalInstanceType = instanceType;
@@ -1831,7 +1954,24 @@ static void handleCmp(VMContext* ctx, uint32_t instr) {
     RValue a = stackPop(ctx);
 
     bool result;
-    if (a.type == RVALUE_UNDEFINED || b.type == RVALUE_UNDEFINED) {
+    if ((a.type == RVALUE_INT32 || a.type == RVALUE_REAL) && (b.type == RVALUE_INT32 || b.type == RVALUE_REAL)) {
+        // Hot path (99%+ of comparisons): both sides already numeric. Skips the type
+        // ladder and the RValue_toReal switches below; epsilon semantics are identical.
+        GMLReal da = (a.type == RVALUE_INT32) ? (GMLReal) a.int32 : a.real;
+        GMLReal db = (b.type == RVALUE_INT32) ? (GMLReal) b.int32 : b.real;
+        GMLReal diff = da - db;
+        // GML uses epsilon-based comparison for all numeric CMP operations
+        int cmp = GMLReal_fabs(diff) <= GML_MATH_EPSILON ? 0 : (diff < 0 ? -1 : 1);
+        switch (cmpKind) {
+            case CMP_LT:  result = cmp < 0; break;
+            case CMP_LTE: result = cmp <= 0; break;
+            case CMP_EQ:  result = cmp == 0; break;
+            case CMP_NEQ: result = cmp != 0; break;
+            case CMP_GTE: result = cmp >= 0; break;
+            case CMP_GT:  result = cmp > 0; break;
+            default: result = false; break;
+        }
+    } else if (a.type == RVALUE_UNDEFINED || b.type == RVALUE_UNDEFINED) {
         // Undefined is only == to undefined
         bool eq = a.type == b.type;
         switch (cmpKind) {
@@ -2077,7 +2217,16 @@ static void handleCall(VMContext* ctx, uint32_t instr, const uint8_t* extraData)
     // Fast path: cached builtin function pointer
     if (cache->builtin != nullptr) {
         BuiltinFunc builtin = (BuiltinFunc) cache->builtin;
+#ifdef ENABLE_VM_GML_PROFILER
+        uint64_t builtinProfileT0 = (ctx->profiler != nullptr && ctx->builtinProfileTime != nullptr) ? nowNanos() : 0;
+#endif
         RValue result = builtin(ctx, args, argCount);
+#ifdef ENABLE_VM_GML_PROFILER
+        if (builtinProfileT0 != 0) {
+            ctx->builtinProfileTime[funcIndex] += nowNanos() - builtinProfileT0;
+            ctx->builtinProfileCalls[funcIndex]++;
+        }
+#endif
         // Free arguments
         if (args != nullptr) {
             repeat(argCount, i) {
@@ -2510,6 +2659,76 @@ static const char* opcodeName(uint8_t opcode) {
     }
 }
 
+
+#ifdef ENABLE_VM_GML_PROFILER
+char* VM_createBuiltinProfilerReport(VMContext* ctx, int topN, int framesInWindow) {
+    if (ctx == nullptr || ctx->builtinProfileTime == nullptr || ctx->builtinProfileCalls == nullptr) return nullptr;
+    if (ctx->profiler == nullptr) return nullptr;
+    uint32_t funcCount = ctx->funcCallCacheCount;
+    if (funcCount == 0) return nullptr;
+    if (0 >= framesInWindow) framesInWindow = 1;
+
+    uint64_t totalTime = 0;
+    uint64_t totalCalls = 0;
+    uint32_t activeCount = 0;
+    repeat(funcCount, i) {
+        if (ctx->builtinProfileCalls[i] > 0) {
+            totalTime += ctx->builtinProfileTime[i];
+            totalCalls += ctx->builtinProfileCalls[i];
+            activeCount++;
+        }
+    }
+    if (activeCount == 0) return nullptr;
+
+    // Sort indices by time desc (simple selection into a temp index array; windows are small).
+    uint32_t* order = (uint32_t *)safeMalloc(activeCount * sizeof(uint32_t));
+    {
+    uint32_t n = 0;
+    repeat(funcCount, i) {
+        if (ctx->builtinProfileCalls[i] > 0) order[n++] = i;
+    }
+    // Insertion sort by time descending.
+    for (uint32_t i = 1; activeCount > i; i++) {
+        uint32_t key = order[i];
+        uint32_t j = i;
+        while (j > 0 && ctx->builtinProfileTime[order[j - 1]] < ctx->builtinProfileTime[key]) {
+            order[j] = order[j - 1];
+            j--;
+        }
+        order[j] = key;
+    }
+    }
+
+    size_t limit = activeCount;
+    if (topN > 0 && (size_t) topN < limit) limit = (size_t) topN;
+
+    StringBuilder sb = StringBuilder_create(64);
+    double frames = (double) framesInWindow;
+    StringBuilder_appendFormat(&sb, "Builtin Profiler (avg %d frames)\n", framesInWindow);
+    repeat(limit, i) {
+        uint32_t fi = order[i];
+        const char* name = (ctx->dataWin != nullptr && fi < ctx->dataWin->func.functionCount) ? ctx->dataWin->func.functions[fi].name : "?";
+        double perFrameMs = ((double)(int64_t) ctx->builtinProfileTime[fi] / 1000000.0) / frames;
+        double callsPerFrame = (double)(int64_t) ctx->builtinProfileCalls[fi] / frames;
+        double nsPerCall = ctx->builtinProfileCalls[fi] > 0 ? (double)(int64_t) ctx->builtinProfileTime[fi] / (double)(int64_t) ctx->builtinProfileCalls[fi] : 0.0;
+        StringBuilder_appendFormat(&sb, "%.2fms %.0f calls (%.0f ns/call) %s\n", perFrameMs, callsPerFrame, nsPerCall, name);
+    }
+    StringBuilder_appendFormat(&sb, "total %.2fms/frame, %.0f calls/frame (%u builtins)", ((double)(int64_t) totalTime / 1000000.0) / frames, (double)(int64_t) totalCalls / frames, activeCount);
+    free(order);
+    char* result = StringBuilder_toString(&sb);
+    StringBuilder_free(&sb);
+    return result;
+}
+
+void VM_resetBuiltinProfiler(VMContext* ctx) {
+    if (ctx == nullptr) return;
+    if (ctx->builtinProfileTime != nullptr)
+        memset(ctx->builtinProfileTime, 0, ctx->funcCallCacheCount * sizeof(uint64_t));
+    if (ctx->builtinProfileCalls != nullptr)
+        memset(ctx->builtinProfileCalls, 0, ctx->funcCallCacheCount * sizeof(uint64_t));
+}
+#endif
+
 #ifdef ENABLE_VM_OPCODE_PROFILER
 static char gmlTypeChar(uint8_t type);
 
@@ -2882,6 +3101,24 @@ static void unwindVMStack(VMContext* ctx, int32_t newStackTop) {
     ctx->stack.top = newStackTop;
 }
 
+// Computed-goto dispatch (GCC/Clang): a 256-entry table turns the sparse 33-way
+// opcode switch into a single indirect jump. Verified behavior-identical via the
+// synth-bench state hash. Other compilers (MSVC) keep the portable switch.
+#if defined(__GNUC__) && !defined(VM_FORCE_SWITCH_DISPATCH)
+#define VM_USE_COMPUTED_GOTO 1
+#else
+#define VM_USE_COMPUTED_GOTO 0
+#endif
+
+#if VM_USE_COMPUTED_GOTO
+#define VM_OPCASE(op) vm_op_##op:
+#define VM_OPBREAK() goto vm_dispatch_loop
+#define VM_OPDEFAULT() vm_op_default:
+#else
+#define VM_OPCASE(op) case op:
+#define VM_OPBREAK() break
+#define VM_OPDEFAULT() default:
+#endif
 static RValue executeLoop(VMContext* ctx) {
     // codeEnd and bytecodeBase are invariant for the lifetime of this executeLoop call, so let's hoist them to avoid the compiler emitting code to
     // reload the values at the end of every iteration.
@@ -2893,7 +3130,41 @@ static RValue executeLoop(VMContext* ctx) {
 
     // Some opcodes have their handler or parts of their handler inlined
     // Those are opcodes that during real gameplay (using "--profile-opcodes") shown that, with inlining and keeping only the frequently called handle parts, we could squeeze MORE performance from the interpreter!
+#if VM_USE_COMPUTED_GOTO
+#if defined(__GNUC__) && !defined(VM_FORCE_SWITCH_DISPATCH)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Woverride-init"
+#endif
+    static void* const opcodeGotoTable[256] = {
+        [0 ... 255] = &&vm_op_default,
+        [OP_CONV] = &&vm_op_OP_CONV, [OP_MUL] = &&vm_op_OP_MUL, [OP_DIV] = &&vm_op_OP_DIV,
+        [OP_REM] = &&vm_op_OP_REM, [OP_MOD] = &&vm_op_OP_MOD, [OP_ADD] = &&vm_op_OP_ADD,
+        [OP_SUB] = &&vm_op_OP_SUB, [OP_AND] = &&vm_op_OP_AND, [OP_OR] = &&vm_op_OP_OR,
+        [OP_XOR] = &&vm_op_OP_XOR, [OP_NEG] = &&vm_op_OP_NEG, [OP_NOT] = &&vm_op_OP_NOT,
+        [OP_SHL] = &&vm_op_OP_SHL, [OP_SHR] = &&vm_op_OP_SHR, [OP_CMP] = &&vm_op_OP_CMP,
+        [OP_POP] = &&vm_op_OP_POP, [OP_PUSHI] = &&vm_op_OP_PUSHI, [OP_DUP] = &&vm_op_OP_DUP,
+        [OP_RET] = &&vm_op_OP_RET, [OP_EXIT] = &&vm_op_OP_EXIT, [OP_POPZ] = &&vm_op_OP_POPZ,
+        [OP_B] = &&vm_op_OP_B, [OP_BT] = &&vm_op_OP_BT, [OP_BF] = &&vm_op_OP_BF,
+        [OP_PUSHENV] = &&vm_op_OP_PUSHENV, [OP_POPENV] = &&vm_op_OP_POPENV,
+        [OP_PUSH] = &&vm_op_OP_PUSH, [OP_PUSHLOC] = &&vm_op_OP_PUSHLOC,
+        [OP_PUSHGLB] = &&vm_op_OP_PUSHGLB, [OP_PUSHBLTN] = &&vm_op_OP_PUSHBLTN,
+        [OP_CALL] = &&vm_op_OP_CALL,
+#if IS_WAD17_OR_HIGHER_ENABLED
+        [OP_CALLV] = &&vm_op_OP_CALLV,
+#endif
+        [OP_BREAK] = &&vm_op_OP_BREAK
+    };
+#if defined(__GNUC__) && !defined(VM_FORCE_SWITCH_DISPATCH)
+#pragma GCC diagnostic pop
+#endif
+#endif
+#if VM_USE_COMPUTED_GOTO
+vm_dispatch_loop:
+    if (!(codeEnd > ip))
+        goto vm_dispatch_done;
+#else
     while (codeEnd > ip) {
+#endif
 #ifdef ENABLE_WAD17
         if (ctx->exception != nullptr) {
 #ifdef ENABLE_VM_EXCEPTIONS_LOGS
@@ -3018,9 +3289,13 @@ static RValue executeLoop(VMContext* ctx) {
         }
 #endif
 
+#if VM_USE_COMPUTED_GOTO
+        goto *opcodeGotoTable[opcode];
+#else
         switch (opcode) {
+#endif
             // Push instructions
-            case OP_PUSH: {
+            VM_OPCASE(OP_PUSH) {
                 uint8_t type1 = instrType1(instr);
                 // Inline fast paths for variable reads (not ints, doubles, etc, only VARIABLES) that are "normal" type (not arrays, not stacktop, and not the new fangled BC17 array reads)
                 if (type1 == GML_TYPE_VARIABLE) {
@@ -3028,7 +3303,21 @@ static RValue executeLoop(VMContext* ctx) {
                     uint8_t varType = (uint8_t) ((varRef >> 24) & 0xF8);
                     if (varType == VARTYPE_NORMAL) {
                         Variable* varDef = resolveVarDef(ctx, varRef);
-                        if (varDef->varID >= 0) {
+                        if (varDef->varID == VARIABLE_BUILTIN) {
+                            int32_t instanceType = (int32_t) instrInstanceType(instr);
+                            RValue val;
+                            if (tryFastBuiltinRead(ctx, instanceType, varDef, &val)) {
+                                stackPushTyped(ctx, val, GML_TYPE_VARIABLE);
+#ifdef ENABLE_VM_TRACING
+                                Instance* traceTarget = (instanceType == INSTANCE_OTHER) ? (Instance*) ctx->otherInstance : (Instance*) ctx->currentInstance;
+                                if (traceTarget == nullptr && instanceType == INSTANCE_OTHER) traceTarget = (Instance*) ctx->currentInstance;
+                                if (traceTarget != nullptr && traceTarget->objectIndex >= 0) {
+                                    VM_checkIfVariableShouldBeTracedAndLog(ctx, instanceObjectName(ctx, traceTarget), "self", varDef->name, val, false, -1, traceTarget->instanceId, " (builtin)");
+                                }
+#endif
+                                VM_OPBREAK();
+                            }
+                        } else if (varDef->varID >= 0) {
                             int32_t instanceType = (int32_t) instrInstanceType(instr);
                             RValue val;
                             if (tryFastVarRead(ctx, instanceType, varDef, &val)) {
@@ -3053,15 +3342,15 @@ static RValue executeLoop(VMContext* ctx) {
                                     }
                                 }
 #endif
-                                break;
+                                VM_OPBREAK();
                             }
                         }
                     }
                 }
                 handlePush(ctx, instr, extraData, type1);
-                break;
+                VM_OPBREAK();
             }
-            case OP_PUSHLOC: {
+            VM_OPCASE(OP_PUSHLOC) {
                 uint32_t varRef = resolveVarOperand(extraData);
 #if IS_WAD17_OR_HIGHER_ENABLED
                 uint8_t varType = (uint8_t) ((varRef >> 24) & 0xF8);
@@ -3070,7 +3359,7 @@ static RValue executeLoop(VMContext* ctx) {
                     uint32_t localSlot = resolveLocalSlot(ctx, varDef->varID);
                     require(ctx->localVarCount > localSlot);
                     pushTopLevelArrayRef(ctx, &ctx->localVars[localSlot], varType == VARTYPE_ARRAYPOPAF);
-                    break;
+                    VM_OPBREAK();
                 }
 #endif
                 // Locals are always non-builtin (varID >= 0); inline the read straight from localVars[].
@@ -3083,24 +3372,37 @@ static RValue executeLoop(VMContext* ctx) {
 #ifdef ENABLE_VM_TRACING
                 VM_checkIfVariableShouldBeTracedAndLog(ctx, "local", nullptr, varDef->name, val, false, -1, -1, "");
 #endif
-                break;
+                VM_OPBREAK();
             }
-            case OP_PUSHGLB: {
+            VM_OPCASE(OP_PUSHGLB) {
                 uint32_t varRef = resolveVarOperand(extraData);
-                // TODO: Re-add fast-path here!
+                uint8_t varType = (uint8_t) ((varRef >> 24) & 0xF8);
+                if (varType == VARTYPE_NORMAL) {
+                    Variable* varDef = resolveVarDef(ctx, varRef);
+                    if (varDef->varID >= 0) {
+                        RValue val;
+                        if (tryFastVarRead(ctx, INSTANCE_GLOBAL, varDef, &val)) {
+                            stackPushTyped(ctx, val, GML_TYPE_VARIABLE);
+#ifdef ENABLE_VM_TRACING
+                            VM_checkIfVariableShouldBeTracedAndLog(ctx, "global", nullptr, varDef->name, val, false, -1, -1, "");
+#endif
+                            VM_OPBREAK();
+                        }
+                    }
+                }
                 RValue val = resolveVariableRead(ctx, INSTANCE_GLOBAL, varRef);
                 stackPushTyped(ctx, val, GML_TYPE_VARIABLE);
-                break;
+                VM_OPBREAK();
             }
-            case OP_PUSHBLTN:
+            VM_OPCASE(OP_PUSHBLTN)
                 handlePushBltn(ctx, instr, extraData);
-                break;
-            case OP_PUSHI:
+                VM_OPBREAK();
+            VM_OPCASE(OP_PUSHI)
                 handlePushI(ctx, instr);
-                break;
+                VM_OPBREAK();
 
             // Pop instructions
-            case OP_POP: {
+            VM_OPCASE(OP_POP) {
                 uint8_t type1 = instrType1(instr);
                 uint32_t varRef = resolveVarOperand(extraData);
                 uint8_t varType = (uint8_t) ((varRef >> 24) & 0xF8);
@@ -3112,19 +3414,50 @@ static RValue executeLoop(VMContext* ctx) {
                     // Inline fast path for the simple variable-assignment case: type1==VARIABLE, which is ~99.998% of all Pops in real workloads
                     RValue val = stackPop(ctx);
                     val = coerceIntStoreToReal(val, type2);
-                    resolveVariableWrite(ctx, instanceType, varRef, val);
+                    Variable* popVarDef = resolveVarDef(ctx, varRef);
+                    if (popVarDef->varID == VARIABLE_BUILTIN) {
+                        if (tryFastBuiltinWrite(ctx, instanceType, popVarDef, val)) {
+                            // setVariable only borrows val (same as the slow path); we still own it.
+#ifdef ENABLE_VM_TRACING
+                            Instance* traceTarget = (instanceType == INSTANCE_OTHER) ? (Instance*) ctx->otherInstance : (Instance*) ctx->currentInstance;
+                            if (traceTarget == nullptr && instanceType == INSTANCE_OTHER) traceTarget = (Instance*) ctx->currentInstance;
+                            if (instanceType == INSTANCE_GLOBAL) {
+                                VM_checkIfVariableShouldBeTracedAndLog(ctx, "global", nullptr, popVarDef->name, val, true, -1, -1, " (builtin)");
+                            } else if (traceTarget != nullptr && traceTarget->objectIndex >= 0) {
+                                VM_checkIfVariableShouldBeTracedAndLog(ctx, instanceObjectName(ctx, traceTarget), "self", popVarDef->name, val, true, -1, traceTarget->instanceId, " (builtin)");
+                            }
+#endif
+                            RValue_free(&val);
+                        } else {
+                            resolveVariableWrite(ctx, instanceType, varRef, val);
+                        }
+                    } else if (popVarDef->varID >= 0 && tryFastVarWrite(ctx, instanceType, popVarDef, val)) {
+                        // tryFastVarWrite consumed val (SELF: copy+free, LOCAL: steal — same as the slow path).
+#ifdef ENABLE_VM_TRACING
+                        if (instanceType == INSTANCE_SELF) {
+                            Instance* traceInst = (Instance*) ctx->currentInstance;
+                            RValue written = Instance_getSelfVar(traceInst, popVarDef->varID);
+                            VM_checkIfVariableShouldBeTracedAndLog(ctx, instanceObjectName(ctx, traceInst), "self", popVarDef->name, written, true, -1, traceInst->instanceId, "");
+                        } else if (instanceType == INSTANCE_LOCAL) {
+                            uint32_t traceSlot = resolveLocalSlot(ctx, popVarDef->varID);
+                            VM_checkIfVariableShouldBeTracedAndLog(ctx, "local", nullptr, popVarDef->name, ctx->localVars[traceSlot], true, -1, -1, "");
+                        }
+#endif
+                    } else {
+                        resolveVariableWrite(ctx, instanceType, varRef, val);
+                    }
                 } else {
                     handlePop(ctx, type1, type2, varRef, varType, instanceType);
                 }
-                break;
+                VM_OPBREAK();
             }
-            case OP_POPZ:
+            VM_OPCASE(OP_POPZ)
                 handlePopz(ctx);
-                break;
+                VM_OPBREAK();
 
             // Arithmetic
             // We keep the number + number operations inlined in executeLoop, keeping only the slow path for string concat/repetition
-            case OP_ADD: {
+            VM_OPCASE(OP_ADD) {
                 RValue* slotA = &ctx->stack.slots[ctx->stack.top - 2];
                 RValue* slotB = &ctx->stack.slots[ctx->stack.top - 1];
                 uint8_t aType = slotA->type;
@@ -3148,12 +3481,12 @@ static RValue executeLoop(VMContext* ctx) {
                     RValue a = stackPop(ctx);
                     if (a.type == RVALUE_STRING || b.type == RVALUE_STRING) {
                         handleAddString(ctx, a, b, resultType);
-                        break;
+                        VM_OPBREAK();
                     }
 #ifndef NO_RVALUE_INT64
                     if (a.type == RVALUE_INT64 && b.type == RVALUE_INT64) {
                         stackPushTyped(ctx, RValue_makeInt64(a.int64 + b.int64), resultType);
-                        break;
+                        VM_OPBREAK();
                     }
 #endif
                     GMLReal result = RValue_toReal(a) + RValue_toReal(b);
@@ -3161,9 +3494,9 @@ static RValue executeLoop(VMContext* ctx) {
                     RValue_free(&b);
                     stackPushTyped(ctx, RValue_makeReal(result), resultType);
                 }
-                break;
+                VM_OPBREAK();
             }
-            case OP_SUB: {
+            VM_OPCASE(OP_SUB) {
                 RValue* slotA = &ctx->stack.slots[ctx->stack.top - 2];
                 RValue* slotB = &ctx->stack.slots[ctx->stack.top - 1];
                 uint8_t aType = slotA->type;
@@ -3186,7 +3519,7 @@ static RValue executeLoop(VMContext* ctx) {
 #ifndef NO_RVALUE_INT64
                     if (a.type == RVALUE_INT64 && b.type == RVALUE_INT64) {
                         stackPushTyped(ctx, RValue_makeInt64(a.int64 - b.int64), resultType);
-                        break;
+                        VM_OPBREAK();
                     }
 #endif
                     GMLReal result = RValue_toReal(a) - RValue_toReal(b);
@@ -3194,9 +3527,9 @@ static RValue executeLoop(VMContext* ctx) {
                     RValue_free(&b);
                     stackPushTyped(ctx, RValue_makeReal(result), resultType);
                 }
-                break;
+                VM_OPBREAK();
             }
-            case OP_MUL: {
+            VM_OPCASE(OP_MUL) {
                 RValue* slotA = &ctx->stack.slots[ctx->stack.top - 2];
                 RValue* slotB = &ctx->stack.slots[ctx->stack.top - 1];
                 uint8_t aType = slotA->type;
@@ -3218,12 +3551,12 @@ static RValue executeLoop(VMContext* ctx) {
                     RValue a = stackPop(ctx);
                     if (a.type == RVALUE_STRING) {
                         handleMulString(ctx, a, b, resultType);
-                        break;
+                        VM_OPBREAK();
                     }
 #ifndef NO_RVALUE_INT64
                     if (a.type == RVALUE_INT64 && b.type == RVALUE_INT64) {
                         stackPushTyped(ctx, RValue_makeInt64(a.int64 * b.int64), resultType);
-                        break;
+                        VM_OPBREAK();
                     }
 #endif
                     GMLReal result = RValue_toReal(a) * RValue_toReal(b);
@@ -3231,25 +3564,25 @@ static RValue executeLoop(VMContext* ctx) {
                     RValue_free(&b);
                     stackPushTyped(ctx, RValue_makeReal(result), resultType);
                 }
-                break;
+                VM_OPBREAK();
             }
-            case OP_DIV: handleDiv(ctx, instr); break;
-            case OP_REM: handleRem(ctx, instr); break;
-            case OP_MOD: handleMod(ctx, instr); break;
+            VM_OPCASE(OP_DIV) handleDiv(ctx, instr); VM_OPBREAK();
+            VM_OPCASE(OP_REM) handleRem(ctx, instr); VM_OPBREAK();
+            VM_OPCASE(OP_MOD) handleMod(ctx, instr); VM_OPBREAK();
 
             // Bitwise / Logical
-            case OP_AND: handleAnd(ctx, instr); break;
-            case OP_OR:  handleOr(ctx, instr);  break;
-            case OP_XOR: handleXor(ctx, instr); break;
-            case OP_SHL: handleShl(ctx, instr); break;
-            case OP_SHR: handleShr(ctx, instr); break;
+            VM_OPCASE(OP_AND) handleAnd(ctx, instr); VM_OPBREAK();
+            VM_OPCASE(OP_OR)  handleOr(ctx, instr); VM_OPBREAK();
+            VM_OPCASE(OP_XOR) handleXor(ctx, instr); VM_OPBREAK();
+            VM_OPCASE(OP_SHL) handleShl(ctx, instr); VM_OPBREAK();
+            VM_OPCASE(OP_SHR) handleShr(ctx, instr); VM_OPBREAK();
 
             // Unary
-            case OP_NEG: handleNeg(ctx, instr); break;
-            case OP_NOT: handleNot(ctx, instr); break;
+            VM_OPCASE(OP_NEG) handleNeg(ctx, instr); VM_OPBREAK();
+            VM_OPCASE(OP_NOT) handleNot(ctx, instr); VM_OPBREAK();
 
             // Type conversion
-            case OP_CONV: {
+            VM_OPCASE(OP_CONV) {
                 uint8_t srcType = instrType1(instr);
                 uint8_t dstType = instrType2(instr);
                 uint8_t convKey = (uint8_t) ((dstType << 4) | srcType);
@@ -3307,11 +3640,11 @@ static RValue executeLoop(VMContext* ctx) {
                 } else {
                     handleConv(ctx, srcType, dstType, convKey);
                 }
-                break;
+                VM_OPBREAK();
             }
 
             // Comparison
-            case OP_CMP: {
+            VM_OPCASE(OP_CMP) {
                 RValue* slotA = &ctx->stack.slots[ctx->stack.top - 2];
                 RValue* slotB = &ctx->stack.slots[ctx->stack.top - 1];
 
@@ -3336,85 +3669,89 @@ static RValue executeLoop(VMContext* ctx) {
                 } else {
                     handleCmp(ctx, instr);
                 }
-                break;
+                VM_OPBREAK();
             }
 
             // Duplicate
-            case OP_DUP:
+            VM_OPCASE(OP_DUP)
                 handleDup(ctx, instr);
-                break;
+                VM_OPBREAK();
 
             // Branches
             // The reason why these (the branches opcodes) are inlined is because they access ctx->ip
             // So, because they are short n' sweet, we prefer to keep them inlined to avoid any reloading shenanigans that the compiler may do
-            case OP_B: {
+            VM_OPCASE(OP_B) {
                 int32_t offset = instrJumpOffset(instr);
                 ip = instrAddr + offset;
-                break;
+                VM_OPBREAK();
             }
-            case OP_BT: {
+            VM_OPCASE(OP_BT) {
                 bool condition = stackPopInt32(ctx) != 0;
                 if (condition == true) {
                     int32_t offset = instrJumpOffset(instr);
                     ip = instrAddr + offset;
                 }
-                break;
+                VM_OPBREAK();
             }
-            case OP_BF: {
+            VM_OPCASE(OP_BF) {
                 bool condition = stackPopInt32(ctx) != 0;
                 if (condition == false) {
                     int32_t offset = instrJumpOffset(instr);
                     ip = instrAddr + offset;
                 }
-                break;
+                VM_OPBREAK();
             }
 
             // Function call
-            case OP_CALL:
+            VM_OPCASE(OP_CALL)
                 VM_SYNC_IP();
                 handleCall(ctx, instr, extraData);
-                break;
+                VM_OPBREAK();
 #if IS_WAD17_OR_HIGHER_ENABLED
-            case OP_CALLV:
+            VM_OPCASE(OP_CALLV)
                 VM_SYNC_IP();
                 handleCallV(ctx, instr);
-                break;
+                VM_OPBREAK();
 #endif
 
             // Return
-            case OP_RET: {
+            VM_OPCASE(OP_RET) {
                 RValue retVal = stackPop(ctx);
                 return retVal;
             }
 
             // Exit (no return value)
-            case OP_EXIT:
+            VM_OPCASE(OP_EXIT)
                 return scriptFallthroughReturnValue(ctx);
 
             // Environment (with-statements)
-            case OP_PUSHENV:
+            VM_OPCASE(OP_PUSHENV)
                 VM_SYNC_IP();
                 handlePushEnv(ctx, instr, instrAddr);
                 VM_RELOAD_IP();
-                break;
-            case OP_POPENV:
+                VM_OPBREAK();
+            VM_OPCASE(OP_POPENV)
                 VM_SYNC_IP();
                 handlePopEnv(ctx, instr, instrAddr);
                 VM_RELOAD_IP();
-                break;
+                VM_OPBREAK();
 
             // Break (extended opcodes in V17+, no-op/debug in V16)
-            case OP_BREAK:
+            VM_OPCASE(OP_BREAK)
 #if IS_WAD17_OR_HIGHER_ENABLED
                 handleBreak(ctx, instr, instrAddr, extraData);
 #endif
-                break;
+                VM_OPBREAK();
 
-            default:
+            VM_OPDEFAULT()
                 logError("VM: Unknown opcode 0x%02X at offset %u\n", opcode, instrAddr);
                 abort();
+#if VM_USE_COMPUTED_GOTO
+vm_dispatch_done:;
+#else
         }
     }
+#endif
 
     return scriptFallthroughReturnValue(ctx);
 }
@@ -3685,6 +4022,10 @@ VMContext* VM_create(DataWin* dataWin) {
     // This eliminates per-call string hash lookups in handleCall.
     ctx->funcCallCacheCount = dataWin->func.functionCount;
     ctx->funcCallCache = (FuncCallCache *)safeMalloc(dataWin->func.functionCount * sizeof(FuncCallCache));
+#ifdef ENABLE_VM_GML_PROFILER
+    ctx->builtinProfileTime = (uint64_t *)safeCalloc(dataWin->func.functionCount, sizeof(uint64_t));
+    ctx->builtinProfileCalls = (uint64_t *)safeCalloc(dataWin->func.functionCount, sizeof(uint64_t));
+#endif
     {
     repeat(dataWin->func.functionCount, i) {
         const char* name = dataWin->func.functions[i].name;
@@ -4540,6 +4881,13 @@ void VM_free(VMContext* ctx) {
     // Free profiler (no-op if never enabled)
     Profiler_destroy(ctx->profiler);
     ctx->profiler = nullptr;
+
+#ifdef ENABLE_VM_GML_PROFILER
+    free(ctx->builtinProfileTime);
+    ctx->builtinProfileTime = nullptr;
+    free(ctx->builtinProfileCalls);
+    ctx->builtinProfileCalls = nullptr;
+#endif
 
 #ifdef ENABLE_VM_OPCODE_PROFILER
     free(ctx->opcodeVariantCounts);

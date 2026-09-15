@@ -1,5 +1,6 @@
 #include "spatial_grid.h"
 
+#include "gettime.h"
 #include "collision.h"
 #include "instance.h"
 #include "runner.h"
@@ -23,7 +24,9 @@ SpatialGrid* SpatialGrid_create(uint32_t roomWidth, uint32_t roomHeight) {
     return grid;
 }
 
+static long g_gridRemoves = 0, g_gridFullScans = 0, g_gridCellsVisited = 0, g_gridEntriesScanned = 0, g_gridMovedBytes = 0; // TEMP
 void SpatialGrid_free(SpatialGrid* grid) {
+    fprintf(stderr, "GRIDSTAT removes=%ld fullScans=%ld cellsVisited=%ld entriesScanned=%ld movedBytes=%ld\n", g_gridRemoves, g_gridFullScans, g_gridCellsVisited, g_gridEntriesScanned, g_gridMovedBytes); // TEMP
     int32_t totalCells = grid->gridWidth * grid->gridHeight;
     repeat(totalCells, i) {
         arrfree(grid->grid[i]);
@@ -33,7 +36,23 @@ void SpatialGrid_free(SpatialGrid* grid) {
     free(grid);
 }
 
+// Repair the slot record of an instance displaced by swap-remove: it moved to newSlot
+// within the cell identified by packed gridCoordinates. Best-effort: if the instance
+// doesn't track this cell (pre-existing inconsistency), its slot just stays stale and
+// its own removal falls back to the linear sweep, so correctness never depends on it.
+static void SpatialGrid_fixMovedSlot(Instance* moved, uint32_t gridCoordinates, int32_t newSlot) {
+    int32_t movedCells = (int32_t) arrlen(moved->collisionCells);
+    int32_t movedSlots = (int32_t) arrlen(moved->collisionCellSlots);
+    repeat(movedCells, k) {
+        if (k < movedSlots && (uint32_t) moved->collisionCells[k] == gridCoordinates) {
+            moved->collisionCellSlots[k] = newSlot;
+            return;
+        }
+    }
+}
+
 void SpatialGrid_removeInstance(SpatialGrid* grid, Instance* instance) {
+    g_gridRemoves++; // TEMP
     int32_t totalCells = (int32_t)grid->gridWidth * (int32_t)grid->gridHeight;
     int32_t trackedCellCount = (int32_t) arrlen(instance->collisionCells);
     int32_t removedCount = 0;
@@ -41,6 +60,12 @@ void SpatialGrid_removeInstance(SpatialGrid* grid, Instance* instance) {
     // The instance records every cell used when it is inserted, so the normal
     // removal path only needs to visit those cells. This matters for moving
     // danmaku: hundreds of bullets and graze boxes are re-indexed every frame.
+    // Each tracked cell also records the instance's index within that cell, so
+    // removal is O(1) instead of a linear scan plus memmove. The recorded slot
+    // is always verified before use, so a stale slot can only cost a fallback
+    // scan, never a wrong removal. (Cell order is not preserved by swap-remove;
+    // collision queries don't depend on it.)
+    int32_t slotCount = (int32_t) arrlen(instance->collisionCellSlots);
     repeat(trackedCellCount, i) {
         uint32_t gridCoordinates = instance->collisionCells[i];
         int32_t gridX = SpatialGrid_unpackGridX(gridCoordinates);
@@ -50,10 +75,33 @@ void SpatialGrid_removeInstance(SpatialGrid* grid, Instance* instance) {
 
         Instance** cell = grid->grid[cellIndex];
         int32_t cellLen = (int32_t) arrlen(cell);
+        g_gridCellsVisited++; // TEMP
+        int32_t recSlot = (i < slotCount) ? instance->collisionCellSlots[i] : -1;
+        if (recSlot >= 0 && recSlot < cellLen && cell[recSlot] == instance) {
+            int32_t last = cellLen - 1;
+            Instance* moved = (recSlot != last) ? cell[last] : nullptr;
+            // A duplicate occurrence (moved == instance) was never observed, but fall
+            // through to the linear sweep if it happens rather than miscounting.
+            if (moved == nullptr || moved != instance) {
+                if (moved != nullptr) {
+                    cell[recSlot] = moved;
+                    SpatialGrid_fixMovedSlot(moved, gridCoordinates, recSlot);
+                }
+                arrsetlen(cell, last);
+                removedCount++;
+                continue;
+            }
+        }
+        // Stale slot (rare): linear sweep with swap-remove.
+        g_gridEntriesScanned += cellLen; // TEMP
         for (int32_t j = 0; j < cellLen;) {
             if (cell[j] == instance) {
-                if (j < cellLen - 1) memmove(&cell[j], &cell[j + 1], (size_t) (cellLen - 1 - j) * sizeof(Instance*));
-                arrsetlen(cell, cellLen - 1);
+                int32_t last = cellLen - 1;
+                if (j != last) {
+                    cell[j] = cell[last];
+                    SpatialGrid_fixMovedSlot(cell[j], gridCoordinates, j);
+                }
+                arrsetlen(cell, last);
                 removedCount++;
                 cellLen--;
             } else {
@@ -69,12 +117,16 @@ void SpatialGrid_removeInstance(SpatialGrid* grid, Instance* instance) {
     // untracked bullet would recreate the dense-pattern cost this fast path is
     // intended to avoid.
     if (trackedCellCount > 0 && removedCount < trackedCellCount) {
+        g_gridFullScans++; // TEMP
         repeat(totalCells, cellIndex) {
             Instance** cell = grid->grid[cellIndex];
             int32_t cellLen = (int32_t) arrlen(cell);
+            g_gridEntriesScanned += cellLen; // TEMP
             for (int32_t j = 0; j < cellLen;) {
                 if (cell[j] == instance) {
-                    if (j < cellLen - 1) memmove(&cell[j], &cell[j + 1], (size_t) (cellLen - 1 - j) * sizeof(Instance*));
+                    // No record repair here: this path is rare, and any disturbed slot
+                    // self-heals through the verified fast path / linear fallback.
+                    cell[j] = cell[cellLen - 1];
                     arrsetlen(cell, cellLen - 1);
                     removedCount++;
                     cellLen--;
@@ -87,13 +139,27 @@ void SpatialGrid_removeInstance(SpatialGrid* grid, Instance* instance) {
 
     if (trackedCellCount > 0 || removedCount > 0) {
         arrsetlen(instance->collisionCells, 0);
+        arrsetlen(instance->collisionCellSlots, 0); // Keep the parallel slot array in sync
         instance->spatialGridDirty = false;
     }
 }
 
+#ifdef THWWW_TEMP_COLLISION_STATS
+static uint64_t tSyncCalls = 0, tSyncNonEmpty = 0, tSyncDirtyTotal = 0, tSyncNanos = 0, tSyncSkipped = 0, tSyncFull = 0;
+static bool tSyncDumped = false;
+#endif
+
 void SpatialGrid_syncGrid(Runner* runner, SpatialGrid* grid) {
     bool requiresResync = arrlen(grid->dirtyInstances);
+#ifdef THWWW_TEMP_COLLISION_STATS
+    tSyncCalls++;
+    uint64_t tSyncT0 = requiresResync ? nowNanos() : 0;
+#endif
     if (!requiresResync) return;
+#ifdef THWWW_TEMP_COLLISION_STATS
+    tSyncNonEmpty++;
+    tSyncDirtyTotal += (uint64_t) arrlen(grid->dirtyInstances);
+#endif
 
 #ifdef ENABLE_SPATIAL_GRID_LOGS
     logInfo("SpatialGrid: Syncing grid with %d dirty instances\n", arrlen(grid->dirtyInstances));
@@ -110,12 +176,42 @@ void SpatialGrid_syncGrid(Runner* runner, SpatialGrid* grid) {
 
         instance->spatialGridDirty = false;
 
+        InstanceBBox bbox = Collision_getBBox(runner, instance);
+
+        if (bbox.valid) {
+            // Fast path: most movers stay inside the same cells frame to frame.
+            // collisionCells stores packed coords in gx-outer/gy-inner insert order,
+            // so an equal footprint means remove+reinsert would be a no-op: skip it.
+            SpatialGridRange range = SpatialGrid_computeCellRange(grid, bbox.left, bbox.top, bbox.right, bbox.bottom);
+            int32_t wantCells = (range.maxGridX - range.minGridX + 1) * (range.maxGridY - range.minGridY + 1);
+            if (arrlen(instance->collisionCells) == wantCells) {
+                int32_t ci = 0;
+                bool same = true;
+                for (int32_t gx = range.minGridX; range.maxGridX >= gx && same; gx++) {
+                    for (int32_t gy = range.minGridY; range.maxGridY >= gy; gy++) {
+                        if (instance->collisionCells[ci++] != (int32_t) SpatialGrid_packGridCoordinates((uint16_t) gx, (uint16_t) gy)) {
+                            same = false;
+                            break;
+                        }
+                    }
+                }
+                if (same) {
+#ifdef THWWW_TEMP_COLLISION_STATS
+                    tSyncSkipped++;
+#endif
+                    continue;
+                }
+            }
+        }
+
+#ifdef THWWW_TEMP_COLLISION_STATS
+        tSyncFull++;
+#endif
         // Remove from old cells
         SpatialGrid_removeInstance(grid, instance);
 
-        InstanceBBox bbox = Collision_computeBBox(runner, instance);
-
         arrsetlen(instance->collisionCells, 0);
+        arrsetlen(instance->collisionCellSlots, 0); // Keep the parallel slot array in sync
 
         if (!bbox.valid)
             continue;
@@ -124,8 +220,10 @@ void SpatialGrid_syncGrid(Runner* runner, SpatialGrid* grid) {
 
         for (int32_t gx = range.minGridX; range.maxGridX >= gx; gx++) {
             for (int32_t gy = range.minGridY; range.maxGridY >= gy; gy++) {
-                arrput(grid->grid[SpatialGrid_cellIndex(grid, gx, gy)], instance);
+                int32_t insertCell = SpatialGrid_cellIndex(grid, gx, gy);
+                arrput(grid->grid[insertCell], instance);
                 arrput(instance->collisionCells, SpatialGrid_packGridCoordinates(gx, gy));
+                arrput(instance->collisionCellSlots, (int32_t) arrlen(grid->grid[insertCell]) - 1); // Slot record for O(1) removal (parallel to collisionCells)
             }
         }
 
@@ -133,9 +231,24 @@ void SpatialGrid_syncGrid(Runner* runner, SpatialGrid* grid) {
     }
 
     arrsetlen(grid->dirtyInstances, 0);
+#ifdef THWWW_TEMP_COLLISION_STATS
+    tSyncNanos += nowNanos() - tSyncT0;
+    if (runner->frameCount >= 599 && !tSyncDumped) {
+        tSyncDumped = true;
+        logInfo("TEMPCOLL sync: calls=%llu nonempty=%llu dirtyTotal=%llu nanos=%llu (avgNs/nonempty=%.0f avgDirty/nonempty=%.1f)\n",
+            (unsigned long long) tSyncCalls, (unsigned long long) tSyncNonEmpty, (unsigned long long) tSyncDirtyTotal,
+            (unsigned long long) tSyncNanos, tSyncNonEmpty ? (double) tSyncNanos / (double) tSyncNonEmpty : 0.0,
+            tSyncNonEmpty ? (double) tSyncDirtyTotal / (double) tSyncNonEmpty : 0.0);
+        logInfo("TEMPCOLL sync: skipped=%llu full=%llu (skipRate=%.1f%%)\n",
+            (unsigned long long) tSyncSkipped, (unsigned long long) tSyncFull,
+            (tSyncSkipped + tSyncFull) ? 100.0 * (double) tSyncSkipped / (double)(tSyncSkipped + tSyncFull) : 0.0);
+    }
+#endif
 }
 
 void SpatialGrid_markInstanceAsDirty(SpatialGrid* grid, Instance* dirtyInstance) {
+    // Any grid-affecting change also invalidates the memoized collision bbox.
+    dirtyInstance->cachedBBox.valid = false;
     // Structs should NOT be included in the spatial grid!
     if (dirtyInstance->objectIndex == STRUCT_OBJECT_INDEX)
         return;

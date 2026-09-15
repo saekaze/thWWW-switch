@@ -286,6 +286,13 @@ struct VMContext {
 #endif
     Profiler* profiler;
 
+#ifdef ENABLE_VM_GML_PROFILER
+    // Per-FUNC-index builtin timing. Allocated in VM_create (functionCount entries),
+    // filled only while the GML profiler is enabled at runtime (ctx->profiler != nullptr).
+    uint64_t* builtinProfileTime;
+    uint64_t* builtinProfileCalls;
+#endif
+
 #ifdef ENABLE_VM_OPCODE_PROFILER
     bool opcodeProfilerEnabled;
     uint64_t opcodeCounts[256];
@@ -314,6 +321,12 @@ bool VM_isObjectOrDescendant(DataWin* dataWin, int32_t objectIndex, int32_t targ
 int32_t VM_resolveInstanceTarget(VMContext* ctx, int32_t target);
 void VM_buildCrossReferences(VMContext* ctx);
 void VM_disassemble(VMContext* ctx, int32_t codeIndex);
+#ifdef ENABLE_VM_GML_PROFILER
+// Builds a sorted per-builtin timing report (avg over framesInWindow). Caller frees. nullptr if unavailable.
+char* VM_createBuiltinProfilerReport(VMContext* ctx, int topN, int framesInWindow);
+// Zeroes the per-builtin counters (call after printing each window).
+void VM_resetBuiltinProfiler(VMContext* ctx);
+#endif
 #ifdef ENABLE_VM_OPCODE_PROFILER
 // Prints a sorted summary of opcode execution counts to stderr. Does nothing if the opcode profiler was never enabled.
 void VM_printOpcodeProfilerReport(const VMContext* ctx);

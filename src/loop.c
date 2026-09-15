@@ -481,6 +481,113 @@ static void PreProcessedStuff_free(void) {
 #endif
 }
 
+// ===[ SynthBench: deterministic dense gameplay field for host-side A/B ]===
+// --synth-bench jumps straight to room_gp and spawns a fixed bullet+shot field so
+// gameplay-path optimizations (collision, VM, dispatch) can be validated and measured
+// on the host without depending on wall-clock-sensitive menu timing. Fully deterministic
+// (fixed counts/positions/velocities, no RNG). Desktop CLI only; Switch never sets the flag.
+static int32_t synthBenchFindRoom(Runner* runner, const char* name) {
+    DataWin* dw = runner->dataWin;
+    repeat(dw->room.count, i) {
+        if (dw->room.rooms[i].present && dw->room.rooms[i].name != nullptr && strcmp(dw->room.rooms[i].name, name) == 0) return (int32_t) i;
+    }
+    return -1;
+}
+
+static int32_t synthBenchFindObject(Runner* runner, const char* name) {
+    DataWin* dw = runner->dataWin;
+    repeat(dw->objt.count, i) {
+        if (dw->objt.objects[i].present && dw->objt.objects[i].name != nullptr && strcmp(dw->objt.objects[i].name, name) == 0) return (int32_t) i;
+    }
+    return -1;
+}
+
+static double synthBenchAccumMs = 0.0;
+static int synthBenchAccumN = 0;
+
+static void synthBenchSetVar(Runner* runner, Instance* inst, const char* name, RValue val) {
+    if (inst == nullptr) return;
+    ptrdiff_t idx = shgeti(runner->vmContext->varNameMap, (char*) name);
+    if (idx >= 0) Instance_setSelfVar(inst, runner->vmContext->varNameMap[idx].value, val);
+}
+
+static void synthBenchSpawn(Runner* runner, int wave) {
+    int32_t danmakuObj = synthBenchFindObject(runner, "obj_danmaku");
+    int32_t shotObj = synthBenchFindObject(runner, "obj_shot_base");
+    int32_t enemyObj = synthBenchFindObject(runner, "obj_enemy");
+    if (enemyObj < 0) enemyObj = 43; // fallback: bare parent_enemy
+    if (wave == 0) {
+
+        // Shots early-out unless the gameplay state is active.
+        if (runner->vmContext->globalScopeInstance != nullptr)
+            synthBenchSetVar(runner, runner->vmContext->globalScopeInstance, "gp_active", RValue_makeBool(true));
+    }
+
+    // Reap orphaned danmaku visuals (their danmaku deactivated; visual BeginStep is gp-gated and never reaps under the invert).
+    int32_t spawnObj = synthBenchFindObject(runner, "obj_danmaku_spawn");
+    if (spawnObj >= 0) {
+        repeat(arrlenu(runner->instances), i) {
+            Instance* inst = runner->instances[i];
+            if (inst->objectIndex == spawnObj && !inst->destroyed)
+                Runner_destroyInstance(runner, inst, false);
+        }
+    }
+    // Wave 0 fills the field; later waves top up to a ~1000 cap (slow drifters rarely leave).
+    int32_t liveDanmaku = 0;
+    if (danmakuObj >= 0) {
+        repeat(arrlenu(runner->instances), i) {
+            if (runner->instances[i]->objectIndex == danmakuObj && !runner->instances[i]->destroyed) liveDanmaku++;
+        }
+    }
+    int32_t danCount = (wave == 0) ? 700 : (1000 - liveDanmaku > 0 ? 1000 - liveDanmaku : 0);
+    int32_t wob = wave * 57;
+    repeat(danCount, i) {
+        int32_t k = i + wob;
+        GMLReal x = (GMLReal) (40 + (k % 28) * 32);
+        GMLReal y = (GMLReal) (40 + ((k / 28) % 25) * 16);
+        Instance* inst = (danmakuObj >= 0) ? Runner_createInstance(runner, x, y, danmakuObj) : nullptr;
+        if (inst == nullptr) continue;
+        // pos_type=0 branch drives hsp/vsp from angle/spd every frame (direct hsp/vsp would be overwritten).
+        synthBenchSetVar(runner, inst, "angle", RValue_makeReal((GMLReal) ((k * 137) % 360)));
+        synthBenchSetVar(runner, inst, "spd", RValue_makeReal((GMLReal) (0.3 + (k % 5) * 0.1)));
+        // Skip the spawn-branch (it deactivates self; nothing reactivates under the invert) and death-cancels.
+        synthBenchSetVar(runner, inst, "is_spawning", RValue_makeBool(false));
+        synthBenchSetVar(runner, inst, "is_cancelable", RValue_makeBool(false));
+    }
+
+    // Player shots climbing toward the targets (forced vsp guarantees the per-pixel place_meeting loop runs).
+    repeat(120, i) {
+        int32_t k = i + wob;
+        GMLReal x = (GMLReal) (60 + (k % 120) * 7);
+        GMLReal y = (GMLReal) (500 - (k % 5) * 4);
+        Instance* inst = (shotObj >= 0) ? Runner_createInstance(runner, x, y, shotObj) : nullptr;
+        if (inst == nullptr) continue;
+        synthBenchSetVar(runner, inst, "vsp", RValue_makeReal((GMLReal) -6.0));
+        synthBenchSetVar(runner, inst, "y_offscreen", RValue_makeReal((GMLReal) 32.0));
+    }
+
+    // Concrete enemy targets for the shots (bare parent_enemy never dies: no HP logic in the parent).
+    int32_t liveEnemies = 0;
+    repeat(arrlenu(runner->instances), i) {
+        if (runner->instances[i]->objectIndex == enemyObj && !runner->instances[i]->destroyed) liveEnemies++;
+    }
+    int32_t wantEnemies = 6 - liveEnemies > 0 ? 6 - liveEnemies : 0;
+    repeat(wantEnemies, i) {
+        GMLReal x = (GMLReal) (180 + ((i + wob) % 6) * 120);
+        Instance* enemy = Runner_createInstance(runner, x, (GMLReal) 350.0, enemyObj);
+        synthBenchSetVar(runner, enemy, "hp", RValue_makeReal((GMLReal) 10.0));
+    }
+    // Guarantee the kill chain fires: max hitbox damage (player power is unset in the harness).
+    int32_t hitboxObj = synthBenchFindObject(runner, "obj_shot_hitbox");
+    if (hitboxObj >= 0) {
+        repeat(arrlenu(runner->instances), i) {
+            Instance* inst = runner->instances[i];
+            if (inst->objectIndex == hitboxObj && !inst->destroyed)
+                synthBenchSetVar(runner, inst, "damage", RValue_makeReal((GMLReal) 99.0));
+        }
+    }
+}
+
 // ===[ MAIN ]===
 int loop(CommandLineArgs args, const char *argv0) {
 #ifdef _WIN32
@@ -989,6 +1096,14 @@ int loop(CommandLineArgs args, const char *argv0) {
         // Initialize the first room and fire Game Start / Room Start events
         Runner_initFirstRoom(runner);
 
+        if (args.synthBench) {
+            int32_t gpRoom = synthBenchFindRoom(runner, "room_gp");
+            logInfo("SynthBench: room_gp index=%d\n", gpRoom);
+            if (gpRoom >= 0) runner->pendingRoom = gpRoom;
+            // Determinism: obj_gameplay calls randomise() (time-seeded) on stage boundaries; no-op it.
+            runner->vmContext->hasFixedSeed = true;
+        }
+
 #ifdef ENABLE_VM_TRACING
         // Test-only bridge for thWWW's authored diagnostics. The release Switch
         // build disables VM tracing, so this cannot enable invincibility in the
@@ -1055,8 +1170,9 @@ int loop(CommandLineArgs args, const char *argv0) {
             uint64_t frameStartTime = 0;
 
             if (shouldStep) {
-                if (args.traceFrames) {
+                if (args.traceFrames || args.synthBench)
                     frameStartTime = nowNanos();
+                if (args.traceFrames) {
                     logInfo("Frame %d (Start)\n", runner->frameCount);
                 }
 
@@ -1180,13 +1296,64 @@ int loop(CommandLineArgs args, const char *argv0) {
                     memcpy(runner->keyboard->keyReleased, currentKeyReleased, sizeof(runner->keyboard->keyReleased));
                 }
 
+                // The game boots paused AND self-oscillates (gp on odd frames runs the full BeginStep which re-pauses). Force gp=0 post-step: BeginStep then takes the skip-path (no pause writes, stage flow frozen) and recomputes gp=(pause==0)=1 for full-rate Normal steps.
+                if (args.synthBench) {
+                    int32_t gameplayObj = synthBenchFindObject(runner, "obj_gameplay");
+                    if (gameplayObj >= 0 && runner->instancesByExactObject != nullptr &&
+                        (uint32_t) gameplayObj < runner->dataWin->objt.count &&
+                        arrlen(runner->instancesByExactObject[gameplayObj]) > 0) {
+                        Instance* gameplay = runner->instancesByExactObject[gameplayObj][0];
+                        synthBenchSetVar(runner, gameplay, "pause_state", RValue_makeReal((GMLReal) 0.0));
+                    }
+                    if (runner->vmContext->globalScopeInstance != nullptr)
+                        synthBenchSetVar(runner, runner->vmContext->globalScopeInstance, "gp_active", RValue_makeBool(false));
+                }
+                if (args.synthBench && runner->currentRoom != nullptr && runner->currentRoomIndex == synthBenchFindRoom(runner, "room_gp")) {
+                    static bool synthBenchSpawned = false;
+                    static int synthBenchWave = 0;
+                    static int synthBenchLastWaveFrame = 0;
+                    if (!synthBenchSpawned) {
+                        synthBenchSpawned = true;
+                        synthBenchWave = 0;
+                        synthBenchLastWaveFrame = runner->frameCount;
+                        synthBenchSpawn(runner, 0);
+                    } else if (runner->frameCount - synthBenchLastWaveFrame >= 60) {
+                        synthBenchWave++;
+                        synthBenchLastWaveFrame = runner->frameCount;
+                        synthBenchSpawn(runner, synthBenchWave);
+                    }
+                }
                 if (args.profilerFramesBetween > 0 && runner->frameCount > 0 && runner->frameCount % args.profilerFramesBetween == 0) {
                     char* profilerReport = Profiler_createReport(vm->profiler, 20, args.profilerFramesBetween);
+#ifdef ENABLE_VM_GML_PROFILER
+                    char* builtinReport = VM_createBuiltinProfilerReport(vm, 20, args.profilerFramesBetween);
+#else
+                    char* builtinReport = nullptr;
+#endif
                     if (profilerReport != nullptr) {
                         logInfo("%s\n", profilerReport);
+#ifdef THWWW_SWITCH_PROFLOG
+                        {
+                            // Instrumented Switch build: mirror profiler reports to the SD card so they
+                            // can be retrieved without nxlink. One append per window; negligible cost.
+                            FILE* profLog = fopen("sdmc:/switch/thwww/save/prof.log", "a");
+                            if (profLog != nullptr) {
+                                const char* profRoom = (runner->currentRoom != nullptr && runner->currentRoom->name != nullptr) ? runner->currentRoom->name : "?";
+                                fprintf(profLog, "--- frame %d (room %s, instances %u) ---\n%s\n%s\n\n", runner->frameCount, profRoom, (unsigned) arrlenu(runner->instances), profilerReport, builtinReport != nullptr ? builtinReport : "(no builtin profile)");
+                                fclose(profLog);
+                            }
+                        }
+#endif
                         free(profilerReport);
                     }
+                    if (builtinReport != nullptr) {
+                        logInfo("%s\n", builtinReport);
+                        free(builtinReport);
+                    }
                     Profiler_reset(vm->profiler);
+#ifdef ENABLE_VM_GML_PROFILER
+                    VM_resetBuiltinProfiler(vm);
+#endif
                 }
 
                 // Update audio system (gain fading, cleanup ended sounds)
@@ -1315,12 +1482,20 @@ int loop(CommandLineArgs args, const char *argv0) {
 
                 if (args.exitAtFrame >= 0 && runner->frameCount >= args.exitAtFrame) {
                     logInfo("Exiting at frame %d (--exit-at-frame)\n", runner->frameCount);
+                    if (args.synthBench && synthBenchAccumN > 0)
+                        logInfo("SynthBench: mean frame %.4f ms over %d frames (f101+)\n",
+                            synthBenchAccumMs / (double) synthBenchAccumN, synthBenchAccumN);
                     shouldWindowClose = true;
                 }
 
                 if (shouldStep && args.traceFrames) {
                     double frameElapsedMs = (int64_t)(nowNanos() - frameStartTime) / 1000000.0;
                     logInfo("Frame %d (End, %.2f ms)\n", runner->frameCount, frameElapsedMs);
+                }
+                // In-process A/B timer: no per-frame I/O, warmup-excluded.
+                if (shouldStep && args.synthBench && runner->frameCount > 100) {
+                    synthBenchAccumMs += (int64_t)(nowNanos() - frameStartTime) / 1000000.0;
+                    synthBenchAccumN++;
                 }
 
                 // Only swap when there isn't a room change to match the original runner.

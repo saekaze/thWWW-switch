@@ -15,6 +15,12 @@
 // Forward decl for Instance_structDecRef
 struct Runner;
 
+// Axis-aligned bounding box of an instance's collision sprite (world coords).
+typedef struct {
+    GMLReal left, right, top, bottom;
+    bool valid;
+} InstanceBBox;
+
 struct Instance {
     uint32_t instanceId;
     int32_t objectIndex;
@@ -44,7 +50,15 @@ struct Instance {
     uint16_t activeAlarmMask;
     int32_t maskIndex; // collision mask sprite override (-1 = use spriteIndex)
     int32_t* collisionCells; // Used to track where we are
+    int32_t* collisionCellSlots; // Parallel to collisionCells: index of this instance within each tracked cell
     uint32_t lastCollisionQueryId;
+    // Memoized collision bbox (see Collision_getBBox): the bbox plus the exact inputs it was
+    // computed from. Cleared by SpatialGrid_markInstanceAsDirty; a hit additionally requires an
+    // exact field match (catches temp-moves/direct writes) and sprite-generation match.
+    InstanceBBox cachedBBox;
+    float cachedBBoxX, cachedBBoxY, cachedBBoxXscale, cachedBBoxYscale, cachedBBoxAngle;
+    int32_t cachedBBoxSprite; // effective sprite index at cache time (-1 = none)
+    uint32_t cachedBBoxSpriteGen;
 
     // Per-instance self variable storage (sparse open-addressed hashmap, keyed by varID).
     IntRValueHashMap selfVars;

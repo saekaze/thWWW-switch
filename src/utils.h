@@ -60,9 +60,11 @@
 	} \
 } while (0)
 
-static inline void requireMessageFormatted(const char *file, int line, bool condition, const char *fmt, ...) {
-    if (condition)
-        return;
+// Hot-path assertions (RValue_makeIndependent, array writes, div-by-zero checks) evaluate
+// millions of times per minute. The macro keeps the common case a single inlined branch;
+// the log+abort tail is a cold out-of-line call. (A varargs function cannot be inlined,
+// so a plain inline function here would still cost a call per evaluation.)
+static NOINLINE MAYBE_UNUSED void requireMessageFormattedSlow(const char *file, int line, const char *fmt, ...) {
     va_list args;
     logError("Requirement failed at %s:%d: ", file, line);
     va_start(args, fmt);
@@ -71,6 +73,10 @@ static inline void requireMessageFormatted(const char *file, int line, bool cond
     logError("\n");
     abort();
 }
+#define requireMessageFormatted(file, line, condition, ...) \
+    do { \
+        if (!(condition)) requireMessageFormattedSlow((file), (line), __VA_ARGS__); \
+    } while (0)
 
 static inline void* requireNotNullFunction(void* ptr, const char* file, int line, const char* name) {
     if (!ptr) {

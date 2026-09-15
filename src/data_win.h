@@ -227,6 +227,7 @@ typedef struct {
     bool smooth;
     bool preload;
     uint32_t bboxMode;
+    uint32_t bboxGeneration; // bumped whenever bbox-affecting sprite data changes (offset/mode)
     uint32_t sepMasks;
     int32_t originX;
     int32_t originY;

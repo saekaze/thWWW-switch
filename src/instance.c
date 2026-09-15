@@ -11,6 +11,7 @@
 
 Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, GMLReal y) {
     Instance* inst = (Instance *)safeCalloc(1, sizeof(Instance));
+    inst->cachedBBox.valid = false; // calloc already zeroes; explicit: bbox cache starts invalid
     inst->instanceId = instanceId;
     inst->objectIndex = objectIndex;
     inst->refCount = 0;
@@ -91,6 +92,8 @@ void Instance_freeContents(Instance* instance) {
     IntRValueHashMap_freeAllValues(&instance->selfVars);
     arrfree(instance->collisionCells);
     instance->collisionCells = nullptr;
+    arrfree(instance->collisionCellSlots);
+    instance->collisionCellSlots = nullptr;
 }
 
 void Instance_free(Instance* instance) {

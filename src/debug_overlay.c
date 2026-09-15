@@ -71,7 +71,7 @@ void DebugOverlay_drawCollisionMasks(Runner* runner) {
         }
 
         // Draw the AABB outline (works for both AABB-only and precise instances)
-        InstanceBBox bbox = Collision_computeBBox(runner, inst);
+        InstanceBBox bbox = Collision_getBBox(runner, inst);
         if (!bbox.valid) continue;
 
         uint32_t outlineColor = hasPreciseMask ? MASK_COLOR_AABB : MASK_COLOR_AABB_ONLY;

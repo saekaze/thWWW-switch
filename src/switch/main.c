@@ -1,6 +1,7 @@
 #include <loop.h>
 #include <switch.h>
 #include <sys/stat.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <GLES3/gl3.h>
 
@@ -64,7 +65,12 @@ int main(int argc, char* argv[]) {
     args.speedMultiplier = 1.0;
     args.fastForwardSpeed = 0.0;
     args.osType = OS_WINDOWS;
+#ifdef THWWW_SWITCH_PROFLOG
+    args.profilerFramesBetween = 300; // report every ~5s; mirrored to sdmc:/switch/thwww/save/prof.log (see loop.c)
+    remove("sdmc:/switch/thwww/save/prof.log"); // fresh log per run
+#else
     args.profilerFramesBetween = 0;
+#endif
     args.loadType = DATAWINLOADTYPE_LOAD_IN_MEMORY_AHEAD_OF_TIME;
 #if defined(ENABLE_MODERN_GL)
     args.renderer = MODERN_GL;
