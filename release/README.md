@@ -10,7 +10,7 @@ This is a game-specific AArch64/libnx port built on the open-source [Butterscotc
 
 ## Status
 
-The port's corrected runtime build has been tested on physical Nintendo Switch hardware and confirmed working, including gameplay visibility, player damage, stage music, spell/background transitions, and dense danmaku. The October 2026 update fixes the stage 5 background, makes dense Lunatic spell cards run at 60 FPS (see [Performance and CPU clock](#performance-and-cpu-clock)), makes the controls remappable in the game's own Key Config, and brings back the game's name entry for scores and replays.
+The port's corrected runtime build has been tested on physical Nintendo Switch hardware and confirmed working, including gameplay visibility, player damage, stage music, spell/background transitions, and dense danmaku. The October 2026 update fixes the stage 5 background, makes dense Lunatic patterns about 24% cheaper to run (an overclock is still recommended for Lunatic, see [Performance and CPU clock](#performance-and-cpu-clock)), makes the controls remappable in the game's own Key Config, and brings back the game's name entry for scores and replays.
 
 
 ## Installation
@@ -78,11 +78,11 @@ High scores and replays use the game's own name entry (pick the letters with the
 
 ## Performance and CPU clock
 
-The port raises the Switch CPU to **1785 MHz** while it runs (the same boost the other Touhou Switch ports use; Horizon's default is 1020 MHz). The GPU and memory clocks are not touched, and the console restores its normal clock when you leave the game.
+The port runs at the Switch's stock clocks; it does not change them.
 
-Why: thWWW is a GameMaker game, so every bullet runs GameMaker script code through an interpreter. On the hardest Lunatic spell cards that is several hundred bullets running their scripts every frame, and at the stock 1020 MHz the Switch reaches about 50 FPS there. With the boost those cards hold 60 FPS. Ordinary stages run at 60 either way.
+**An overclock is recommended for Lunatic playthroughs.** thWWW is a GameMaker game, so every bullet runs GameMaker script code through an interpreter. On the hardest Lunatic spell cards that is several hundred bullets running their scripts every frame, and at the stock 1020 MHz CPU clock the Switch reaches about 50 FPS there. With the CPU overclocked (tested docked with a ~1.7 GHz overclock) those cards hold 60 FPS; a smaller overclock will probably be enough.
 
-This update also cut the port's own CPU work on dense Lunatic patterns by about 24% (measured on PC across Lunatic stages 3–5, with identical game state frame by frame), but the remaining cost is the game's own scripts. Holding 60 FPS at 1020 MHz would need those scripts compiled to native code instead of interpreted, which is a much larger project. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+This update also cut the port's own CPU work on dense Lunatic patterns by about 24% (measured on PC across Lunatic stages 3–5, with identical game state frame by frame), but the remaining cost is the game's own scripts. Holding 60 FPS at stock clocks there would need those scripts compiled to native code instead of interpreted, which is a much larger project. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 ## Building
 
@@ -116,7 +116,7 @@ The game-specific work includes:
 - a measured 20–24% host CPU improvement in dense stage-5 patterns without reducing collision work;
 - GameMaker's 3D drawing rules for the stage backgrounds: sprites are drawn at their layer depth and clipped by GameMaker's (Direct3D-style) near plane, so the stage 5 tunnel looks like the PC game and the 3D backgrounds stay out of the 2D gameplay view;
 - instances on hidden room layers are not drawn (thWWW's playfield walls);
-- a further ~24% less CPU on dense Lunatic patterns (collision pre-check, ancestry table, cheaper dead-reference sweep, grouped draw sorting, interpreter dispatch, `-O3`) and the 1785 MHz CPU boost;
+- a further ~24% less CPU on dense Lunatic patterns (collision pre-check, ancestry table, cheaper dead-reference sweep, grouped draw sorting, interpreter dispatch, `-O3`);
 - modern GLES surface/depth behavior;
 - vertex formats and triangle-list buffers used by stage 5 and stage 7 backgrounds;
 - a read-only game-data layer with writable saves/replays under `save/`;

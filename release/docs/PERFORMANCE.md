@@ -94,4 +94,4 @@ Changes, all with identical game state:
 - Interpreter: the pending-exception check runs at entry and after CALL/CALLV only (the only places one can be raised) instead of before every instruction.
 - `-O3` for the Switch build (about 8% on its own).
 
-The rest is GameMaker script execution: on these stages most of the time is the bytecode interpreter running the bullets' Step and Draw events. That is why the port also raises the CPU to 1785 MHz, which holds 60 FPS on the same cards.
+The rest is GameMaker script execution: on these stages most of the time is the bytecode interpreter running the bullets' Step and Draw events. The port itself runs at stock clocks. With the CPU overclocked (tested docked with a ~1.7 GHz overclock) the same cards hold 60 FPS, so an overclock is recommended for Lunatic playthroughs.
