@@ -3,7 +3,7 @@
 ## What's new
 
 - **Stage 5 background fixed.** The boat interior is the tunnel from the PC game again (walls, ceiling, wooden floor, the dark opening ahead) instead of a flat, almost top-down view with black triangles at the bottom.
-- **Dense Lunatic spell cards hold 60 FPS.** The port now raises the CPU to 1785 MHz while it runs, like the other Touhou Switch ports, and its own CPU work on dense patterns is about 24% lower. At the stock 1020 MHz the hardest cards reach about 50 FPS because every bullet runs the game's GameMaker scripts through an interpreter; see the README's *Performance and CPU clock*.
+- **Faster dense patterns.** The port's own CPU work on dense Lunatic patterns is about 24% lower. It runs at stock clocks; **an overclock is recommended for Lunatic playthroughs**: at the stock 1020 MHz the hardest spell cards reach about 50 FPS (every bullet runs the game's GameMaker scripts through an interpreter), and with the CPU overclocked (tested docked with a ~1.7 GHz overclock) they hold 60 FPS. A smaller overclock will probably also work.
 - **Remappable controls.** Option → Key Config can rebind shot, focus, bomb and pause. Defaults are unchanged (B shoot, A bomb, L/ZL focus, + pause, R/ZR hold to skip dialogue); X and Y are free to bind. ZL and ZR now work like L and R.
 - **Your own name.** High scores and replays use the game's name entry again instead of the fixed name `SWITCH`.
 

@@ -56,17 +56,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 1785 MHz CPU like the other Saekaze ports (Horizon's default is
-    // 1020 MHz): dense Lunatic patterns are bound by the GML interpreter.
-    if (R_SUCCEEDED(clkrstInitialize())) {
-        ClkrstSession cpu;
-        if (R_SUCCEEDED(clkrstOpenSession(&cpu, PcvModuleId_CpuBus, 3))) {
-            clkrstSetClockRate(&cpu, 1785000000);
-            clkrstCloseSession(&cpu);
-        }
-        clkrstExit();
-    }
-
     CommandLineArgs args = {0};
 
     args.exitAtFrame = -1;
