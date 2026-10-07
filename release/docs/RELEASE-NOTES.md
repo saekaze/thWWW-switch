@@ -1,4 +1,23 @@
-# thWWW-switch 1.0.1 — release notes
+# thWWW-switch — October 2026 update
+
+## What's new
+
+- **Stage 5 background fixed.** The boat interior is the tunnel from the PC game again (walls, ceiling, wooden floor, the dark opening ahead) instead of a flat, almost top-down view with black triangles at the bottom.
+- **Dense Lunatic spell cards hold 60 FPS.** The port now raises the CPU to 1785 MHz while it runs, like the other Touhou Switch ports, and its own CPU work on dense patterns is about 24% lower. At the stock 1020 MHz the hardest cards reach about 50 FPS because every bullet runs the game's GameMaker scripts through an interpreter; see the README's *Performance and CPU clock*.
+- **Remappable controls.** Option → Key Config can rebind shot, focus, bomb and pause. Defaults are unchanged (B shoot, A bomb, L/ZL focus, + pause, R/ZR hold to skip dialogue); X and Y are free to bind. ZL and ZR now work like L and R.
+- **Your own name.** High scores and replays use the game's name entry again instead of the fixed name `SWITCH`.
+
+## Fixes under the hood
+
+- Sprites are drawn at their layer depth (GameMaker's rule for 3D cameras) and clipped by GameMaker's Direct3D-style near plane, so each stage's 3D background stays in the background view. This replaces the old "draw bands" workaround.
+- Instances on hidden room layers are no longer drawn (the playfield walls on thWWW's hidden `Wall` layer showed up as green lines on stage 2 once depth was fixed).
+- Faster collisions for player shots, an O(1) object-ancestry table, a cheaper dead-reference sweep, grouped draw-list sorting, less per-instruction interpreter overhead, and `-O3`. Game state is identical to the previous build frame by frame across Lunatic stages 1–6.
+
+Install as before: replace `thwww.nro` in `/switch/thwww/`. Your `save/` folder is kept.
+
+---
+
+# thWWW-switch 1.0.1 — release notes (September 2026)
 
 Release date: 9 September 2026
 

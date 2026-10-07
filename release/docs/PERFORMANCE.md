@@ -72,3 +72,26 @@ The final host OpenGL/OpenAL build was run through stage 1 and the dense stage-5
 The public release is cross-built with devkitA64 GCC 15.2.0, WAD17-only modern GLES/OpenAL, and warnings as errors. Release artifact hashes are recorded in `release/SHA256SUMS`; the exact source revision used by the build is recorded in `release/SOURCE-COMMIT.txt`.
 
 Static inspection verifies the supplied 256×256 JPEG icon, NACP metadata (`Wonderful Waking World`, `Oligarchomp / thWWW-switch`, version `1.0.1`), and an empty RomFS. Proprietary game data is not embedded.
+
+## October 2026: dense Lunatic patterns
+
+Reported on hardware: about 49–50 FPS on dense Lunatic spell cards at the stock 1020 MHz CPU clock.
+
+Host measurement: Lunatic stages 3–5 in Practice, debug invincibility, held shot, fixed seed, 14,000 frames each, no-op renderer; user CPU time, best of three interleaved runs.
+
+| Build | CPU time | |
+|---|---:|---:|
+| September 2026 release (`-O2`) | 69.0 s | |
+| This update, `-O2` | 56.3 s | −18% |
+| This update, `-O3` (shipped) | 52.3 s | −24% |
+
+Changes, all with identical game state:
+
+- `place_meeting` / `instance_place`: when the target object has at most 64 instances, their bounding boxes are checked first; if none touches the caller's box, the grid walk (mostly bullets and graze boxes around each player shot) is skipped. A hit needs a strict overlap of the same boxes, so this never skips a hit, and when anything may overlap the original grid walk runs unchanged.
+- `VM_isObjectOrDescendant`: a table built once per data.win (rebuilt by `object_set_parent`) instead of walking the parent chain for every grid candidate.
+- Dead-reference sweep: slots outside the dead-id range are rejected before hashing.
+- Draw list: bucketed by (band, depth, type) and fixed up inside each group instead of a full quicksort on every rebuild.
+- Interpreter: the pending-exception check runs at entry and after CALL/CALLV only (the only places one can be raised) instead of before every instruction.
+- `-O3` for the Switch build (about 8% on its own).
+
+The rest is GameMaker script execution: on these stages most of the time is the bytecode interpreter running the bullets' Step and Draw events. That is why the port also raises the CPU to 1785 MHz, which holds 60 FPS on the same cards.

@@ -90,7 +90,7 @@ Saekaze's Touhou 7 controller source was inspected rather than inferring its lay
 
 The Switch backend presents only B=FACE1 (shoot), A=FACE2 (bomb), L=FACE3 (focus), Plus=SHOULDERL (pause), the left stick/D-Pad, and a separate R slot. A Switch-only thWWW compatibility read feeds that R slot into `obj_dialogue`'s held `shot_down` read. It does not affect gameplay reads, so R is not another fire button. Writes to thWWW's four configurable gamepad globals are fixed on Switch, preventing an old `Data.ini` mapping from changing the physical layout. Other buttons and the right stick are not exposed.
 
-The official score/name bytecode was also inspected. `obj_score_entry` clears `global.name_entry`, `obj_name_entry` normally supplies `NO_NAME` for an empty value, and the score insertion copies only the current global name into the new leaderboard position. On Switch, writes to that current global are fixed to `SWITCH`. Existing names loaded into the leaderboard arrays are not rewritten.
+The official score/name bytecode was also inspected. `obj_score_entry` clears `global.name_entry`, `obj_name_entry` normally supplies `NO_NAME` for an empty value, and the score insertion copies only the current global name into the new leaderboard position. Builds before October 2026 fixed writes to that global to `SWITCH` on Switch; the October 2026 update removes that override, so the game's own name entry supplies the name again.
 
 The supplied 447×447 JPEG was converted directly to RGB 256×256 NRO/public assets with Lanczos resampling. The source and generated hashes are recorded in the release package.
 
@@ -111,3 +111,10 @@ The same resolver handles working-directory-prefixed replay files under `/switch
 - Performance measurements are host CPU comparisons, not Tegra X1 profiling.
 - Docking/undocking, repeated Home Menu interruptions, and very long sessions have not been exhaustively characterized.
 - Applet-mode memory may be insufficient. Title takeover/full-memory mode remains the supported launch method.
+
+## October 2026 update
+
+- **Reference renders.** The official Windows build was run under Wine (Xvfb) and driven into Practice for stages 1–6. The port's renders of the same stages were compared side by side: the stage 5 tunnel, the stage 2 water (no wall sprites), and stages 1, 3, 4 and 6 match. Lunatic boss spell backgrounds on stages 2 and 4 render behind the bullets.
+- **Game state.** Full frame-14000 JSON dumps of Lunatic stages 1–6 (debug invincibility, held shot, fixed seed) are identical between the previous build and this one.
+- **Draw order.** The grouped draw-list sort was cross-checked against the previous quicksort on every frame of four Lunatic stages (32,000 frames, no mismatch).
+- **Regressions.** Both scenarios in `scripts/test-thwww-regressions.sh` still pass.

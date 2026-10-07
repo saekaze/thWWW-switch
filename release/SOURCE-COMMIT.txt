@@ -1,3 +1,3 @@
 Project: thWWW-switch
-Source commit: 304115f10e9ec2511aa45d7cb16550a340e4b392
+Source commit: 6399f4464e7fbac010fe71553b83dd6fc4136143
 Upstream runner: https://github.com/ButterscotchRunner/Butterscotch
