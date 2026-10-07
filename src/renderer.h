@@ -204,6 +204,9 @@ struct Renderer {
     int32_t currentShader;
     BlendFactors blendFactors;
     int32_t cameraCurrent;
+    // z of batched sprite/primitive vertices: GameMaker draws each layer at its
+    // depth (unless layer_force_draw_depth), which matters under 3D cameras.
+    float drawDepth;
 };
 
 // ===[ Shared Helpers (platform-agnostic) ]===

@@ -218,6 +218,16 @@ static inline Matrix4f* Matrix4f_setTransform2D(Matrix4f* dest, float x, float y
 
 // Mirrors a world -> clip matrix vertically in NDC (negates the clip-space Y row).
 // Renderers whose framebuffer is stored opposite to GameMaker's top-down convention apply this locally before upload.
+// GameMaker's projections are Direct3D-style (visible depth 0..w); OpenGL
+// clips at -w..w. Remap z = 2z - w so the near plane clips where GameMaker's
+// does (thWWW relies on it to keep its 3D stage geometry out of the 2D view).
+static inline void Matrix4f_d3dDepthToGl(Matrix4f* m) {
+    m->m[2] = 2.0f * m->m[2] - m->m[3];
+    m->m[6] = 2.0f * m->m[6] - m->m[7];
+    m->m[10] = 2.0f * m->m[10] - m->m[11];
+    m->m[14] = 2.0f * m->m[14] - m->m[15];
+}
+
 static inline void Matrix4f_flipClipY(Matrix4f* m) {
     m->m[1] = -m->m[1];
     m->m[5] = -m->m[5];

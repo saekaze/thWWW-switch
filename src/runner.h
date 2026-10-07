@@ -711,9 +711,9 @@ struct Runner {
     struct { int key; Instance* value; }* instancesById;
     bool forceDrawDepth;
     bool applyOffsetForPrimitives;
-    // thWWW compatibility: its stage backgrounds occupy a negative-depth band
-    // that the native runner renders before its non-negative gameplay band.
-    bool negativeDepthBandFirst;
+    // Running Wonderful Waking World (the Switch R dialogue skip and the
+    // host-only debug bridge key off this).
+    bool isThWWW;
     // Depth-sorted unified list of all drawables (instances + tiles + runtime layers) for the current room.
     // Active/visible filtering happens at draw time, so toggling those flags does not invalidate the cache.
     //

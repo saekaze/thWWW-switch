@@ -12283,6 +12283,30 @@ static void tempCollDump(Runner* runner) {
 #endif
 
 // place_meeting(x, y, obj) - returns true if the calling instance would collide with obj at position (x, y)
+// Player shots ask place_meeting/instance_place about the few enemies every
+// frame, while their grid cells are full of bullets and graze boxes. When the
+// target object has few instances, check them directly first: if none of their
+// bounding boxes even touches the caller's (a hit needs a strict overlap of the
+// same boxes), nothing can be found and the grid walk is skipped. Otherwise the
+// grid walk runs unchanged, so which instance is returned never changes.
+#define FEW_TARGET_INSTANCES 64
+static bool targetMayOverlap(Runner* runner, Instance* caller, int32_t target, InstanceBBox callerBBox) {
+    if (target < 0 || target >= INSTANCE_ID_BASE || (uint32_t) target >= runner->dataWin->objt.count) return true;
+    Instance** list = runner->instancesByObject[target];
+    int32_t n = (int32_t) arrlen(list);
+    if (n > FEW_TARGET_INSTANCES) return true;
+    repeat(n, i) {
+        Instance* other = list[i];
+        if (other == caller || !other->active) continue;
+        InstanceBBox b = Collision_getBBox(runner, other);
+        if (!b.valid) continue;
+        if (GMLReal_fmax(callerBBox.left, b.left) > GMLReal_fmin(callerBBox.right, b.right)) continue;
+        if (GMLReal_fmax(callerBBox.top, b.top) > GMLReal_fmin(callerBBox.bottom, b.bottom)) continue;
+        return true;
+    }
+    return false;
+}
+
 static RValue builtin_place_meeting(VMContext* ctx, RValue* args, int32_t argCount) {
     if (3 > argCount) return RValue_makeBool(false);
 
@@ -12311,7 +12335,7 @@ static RValue builtin_place_meeting(VMContext* ctx, RValue* args, int32_t argCou
     tempCollDump(runner);
 #endif
 
-    if (callerBBox.valid) {
+    if (callerBBox.valid && targetMayOverlap(runner, caller, target, callerBBox)) {
         SpatialGridQuery query = SpatialGrid_prepareQuery(runner, callerBBox.left, callerBBox.top, callerBBox.right, callerBBox.bottom, target);
         // A single-cell query can't observe the same instance twice: skip dedup entirely.
         bool pmSingleCell = (query.range.minGridX == query.range.maxGridX && query.range.minGridY == query.range.maxGridY);
@@ -13248,7 +13272,7 @@ static RValue builtin_instance_place(VMContext* ctx, RValue* args, int32_t argCo
     tempCollDump(runner);
 #endif
 
-    if (callerBBox.valid) {
+    if (callerBBox.valid && targetMayOverlap(runner, caller, targetObjIndex, callerBBox)) {
         SpatialGridQuery query = SpatialGrid_prepareQuery(runner, callerBBox.left, callerBBox.top, callerBBox.right, callerBBox.bottom, targetObjIndex);
         // A single-cell query can't observe the same instance twice: skip dedup entirely.
         bool ipSingleCell = (query.range.minGridX == query.range.maxGridX && query.range.minGridY == query.range.maxGridY);
@@ -17578,6 +17602,7 @@ static RValue builtin_object_set_parent(VMContext* ctx, RValue* args, int32_t ar
     int32_t parentId = RValue_toInt32(args[1]);
     if (0 <= id && (uint32_t) id < ctx->dataWin->objt.count) {
         ctx->dataWin->objt.objects[id].parentId = parentId;
+        VM_invalidateObjectAncestry();
     }
     return RValue_makeUndefined();
 }

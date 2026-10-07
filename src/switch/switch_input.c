@@ -11,18 +11,20 @@ static PadState pads[SWITCH_NPAD_COUNT];
 static bool initialized = false;
 
 static void mapLibnxToGml(GamepadSlot* slot, PadState* pad, u64 cur) {
-    // thWWW-switch deliberately uses the same fixed physical layout as
-    // Saekaze's Touhou 7 port instead of exposing GameMaker's configurable
-    // pad layout. The slots below are thWWW's authored logical actions:
-    // FACE1=shoot, FACE2=bomb, FACE3=focus, SHOULDERL=pause.
-    if (cur & HidNpadButton_B) slot->buttonDown[0] = true;
-    if (cur & HidNpadButton_A) slot->buttonDown[1] = true;
-    if (cur & HidNpadButton_L) slot->buttonDown[2] = true;
-    if (cur & HidNpadButton_Plus) slot->buttonDown[4] = true;
-
-    // R is kept on its own otherwise-unused logical slot. The VM exposes it
-    // to obj_dialogue as held skip without aliasing it to gameplay shooting.
-    if (cur & HidNpadButton_R) slot->buttonDown[5] = true;
+    // Each Switch button is its own GameMaker pad button, so thWWW's own
+    // Option -> Key Config can rebind shot, bomb, focus and pause (saved in
+    // Data.ini). B, A, L/ZL and + sit on the buttons thWWW binds by default
+    // (face1 shot, face2 bomb, face3 focus, shoulderl pause), which gives the
+    // same first-launch layout as the other Touhou Switch ports. Key Config
+    // only scans face1..start, so the D-Pad and sticks can never be bound.
+    if (cur & HidNpadButton_B) slot->buttonDown[0] = true;                        // gp_face1
+    if (cur & HidNpadButton_A) slot->buttonDown[1] = true;                        // gp_face2
+    if (cur & (HidNpadButton_L | HidNpadButton_ZL)) slot->buttonDown[2] = true;   // gp_face3
+    if (cur & HidNpadButton_X) slot->buttonDown[3] = true;                        // gp_face4
+    if (cur & HidNpadButton_Plus) slot->buttonDown[4] = true;                     // gp_shoulderl
+    // R/ZR also skips dialogue while held (see vm.c, obj_dialogue).
+    if (cur & (HidNpadButton_R | HidNpadButton_ZR)) slot->buttonDown[5] = true;   // gp_shoulderr
+    if (cur & HidNpadButton_Y) slot->buttonDown[6] = true;                        // gp_shoulderlb
 
     // Both the left stick and D-Pad provide movement. All remaining Switch
     // controls are intentionally inert.

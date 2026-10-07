@@ -797,10 +797,49 @@ static int compareDrawables(const void* a, const void* b) {
     return compareDrawKeys(&drawKeyA, &drawKeyB);
 }
 
+// GameMaker draws each layer at its own depth as z (gpu depth), unless
+// layer_force_draw_depth is on. 2D views don't notice; 3D cameras do (thWWW's
+// stage 5 floor is drawn at the background depth under a perspective camera).
+static void setDrawDepth(Runner* runner, int32_t depth) {
+    if (runner->renderer == nullptr) return;
+    runner->renderer->drawDepth = (float) (runner->forceDrawDepth ? runner->forcedDepth : depth);
+}
+
+// GameMaker runs no draw events for instances on a hidden layer (thWWW keeps
+// its playfield boundary walls on a hidden "Wall" layer). Hidden layers are
+// rare, so collect their ids once per pass and test each instance against them.
+#define MAX_HIDDEN_LAYERS 16
+typedef struct { int32_t count; int32_t ids[MAX_HIDDEN_LAYERS]; bool overflow; } HiddenLayers;
+
+static void collectHiddenLayers(Runner* runner, HiddenLayers* hidden) {
+    hidden->count = 0;
+    hidden->overflow = false;
+    size_t count = arrlenu(runner->runtimeLayers);
+    repeat(count, i) {
+        if (runner->runtimeLayers[i].visible) continue;
+        if (hidden->count == MAX_HIDDEN_LAYERS) { hidden->overflow = true; return; }
+        hidden->ids[hidden->count++] = (int32_t) runner->runtimeLayers[i].id;
+    }
+}
+
+static bool instanceOnHiddenLayer(Runner* runner, const HiddenLayers* hidden, const Instance* inst) {
+    if (hidden->count == 0 || inst->layer < 0) return false;
+    if (hidden->overflow) {
+        RuntimeLayer* layer = Runner_findRuntimeLayerById(runner, inst->layer);
+        return layer != nullptr && !layer->visible;
+    }
+    for (int32_t i = 0; hidden->count > i; i++)
+        if (hidden->ids[i] == inst->layer) return true;
+    return false;
+}
+
 static void fireDrawSubtype(Runner* runner, Drawable* drawables, int32_t drawableCount, int32_t subtype) {
     int32_t slot = EventSlotMap_lookup(&runner->eventSlotMap, EVENT_DRAW, subtype);
     if (slot == -1) return;
     int32_t col = drawSubtypeCacheColumn(subtype);
+
+    HiddenLayers hidden;
+    collectHiddenLayers(runner, &hidden);
 
     repeat(drawableCount, i) {
         Drawable* d = &drawables[i];
@@ -808,8 +847,9 @@ static void fireDrawSubtype(Runner* runner, Drawable* drawables, int32_t drawabl
             continue;
 
         Instance* inst = d->instance;
-        if (!inst->active || !inst->visible)
+        if (!inst->active || !inst->visible || instanceOnHiddenLayer(runner, &hidden, inst))
             continue;
+        setDrawDepth(runner, d->depth);
 
         int32_t ownerObjectIndex = -1;
         int32_t codeId;
@@ -894,7 +934,14 @@ static bool isDrawableArraySorted(Drawable* drawables, int32_t count) {
 }
 
 static int32_t drawableSortBand(const Runner* runner, int32_t depth) {
-    return runner->negativeDepthBandFirst && depth >= 0 ? 1 : 0;
+    // thWWW used to need its negative-depth stage backgrounds moved into a
+    // band before gameplay. With sprites drawn at their layer depth and
+    // GameMaker's near-plane clipping, plain depth order is right: the 2D
+    // gameplay camera clips the backgrounds, and in the 3D background view
+    // they cover the gameplay layers drawn before them.
+    (void) runner;
+    (void) depth;
+    return 0;
 }
 
 // Refreshes each entry's cached .depth from the live instance/runtime-layer pointer. Tile entries never change depth mid-room so they're left alone.
@@ -965,6 +1012,82 @@ static void sortDrawablesRec(Drawable* arr, int32_t lo, int32_t hi) {
 
 static void sortDrawablesByKey(Drawable* arr, int32_t count) {
     if (count > 1) sortDrawablesRec(arr, 0, count - 1);
+}
+
+// Full rebuilds happen almost every frame in dense patterns (bullets come and
+// go), and a frame holds thousands of drawables but only a handful of distinct
+// (band, depth, type) groups. Bucket the entries by group with a stable
+// counting sort, then fix the order inside each group: it arrives in instance
+// list order, which is usually already sorted or exactly reversed. DrawKey is
+// a total order, so the result is identical to sortDrawablesByKey.
+#define MAX_DRAW_GROUPS 64
+static int compareDrawGroups(const DrawKey* a, const DrawKey* b) {
+    if (a->sortBand != b->sortBand) return a->sortBand < b->sortBand ? -1 : 1;
+    if (a->depth != b->depth) return a->depth > b->depth ? -1 : 1;
+    if (a->type != b->type) return a->type < b->type ? -1 : 1;
+    return 0;
+}
+
+static void sortDrawablesGrouped(Drawable* arr, int32_t count) {
+    DrawKey groups[MAX_DRAW_GROUPS];
+    int32_t groupCount = 0;
+    int32_t groupStart[MAX_DRAW_GROUPS + 1];
+    // Collect distinct groups in sorted order (insertion into a small array).
+    repeat(count, i) {
+        const DrawKey* k = &arr[i].sortKey;
+        int32_t lo = 0, hi = groupCount;
+        while (lo < hi) {
+            int32_t mid = (lo + hi) >> 1;
+            if (compareDrawGroups(&groups[mid], k) < 0) lo = mid + 1; else hi = mid;
+        }
+        if (lo < groupCount && compareDrawGroups(&groups[lo], k) == 0) continue;
+        if (groupCount == MAX_DRAW_GROUPS) { sortDrawablesByKey(arr, count); return; }
+        memmove(&groups[lo + 1], &groups[lo], (size_t) (groupCount - lo) * sizeof(DrawKey));
+        groups[lo] = *k;
+        groupCount++;
+    }
+    static Drawable* scratch = nullptr;
+    static int32_t* groupOf = nullptr;
+    arrsetlen(scratch, count);
+    arrsetlen(groupOf, count);
+    memset(groupStart, 0, sizeof(int32_t) * (size_t) (groupCount + 1));
+    repeat(count, i) {
+        const DrawKey* k = &arr[i].sortKey;
+        int32_t lo = 0, hi = groupCount - 1;
+        while (lo < hi) {
+            int32_t mid = (lo + hi) >> 1;
+            if (compareDrawGroups(&groups[mid], k) < 0) lo = mid + 1; else hi = mid;
+        }
+        groupOf[i] = lo;
+        groupStart[lo + 1]++;
+    }
+    for (int32_t g = 0; groupCount > g; g++) groupStart[g + 1] += groupStart[g];
+    {
+        int32_t fill[MAX_DRAW_GROUPS];
+        memcpy(fill, groupStart, sizeof(int32_t) * (size_t) groupCount);
+        repeat(count, i) scratch[fill[groupOf[i]]++] = arr[i];
+    }
+    memcpy(arr, scratch, sizeof(Drawable) * (size_t) count);
+
+    for (int32_t g = 0; groupCount > g; g++) {
+        Drawable* part = arr + groupStart[g];
+        int32_t n = groupStart[g + 1] - groupStart[g];
+        if (n < 2) continue;
+        bool ascending = true, descending = true;
+        for (int32_t i = 1; n > i && (ascending || descending); i++) {
+            int c = compareDrawKeys(&part[i - 1].sortKey, &part[i].sortKey);
+            if (c > 0) ascending = false;
+            if (c < 0) descending = false;
+        }
+        if (ascending) continue;
+        if (descending) {
+            for (int32_t i = 0, j = n - 1; i < j; i++, j--) {
+                Drawable tmp = part[i]; part[i] = part[j]; part[j] = tmp;
+            }
+            continue;
+        }
+        sortDrawablesByKey(part, n);
+    }
 }
 
 // Rebuilds runner->cachedDrawables when invalidated. Two-tier strategy:
@@ -1039,7 +1162,7 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
 
         int32_t count = (int32_t) arrlen(runner->cachedDrawables);
         if (count > 1) {
-            sortDrawablesByKey(runner->cachedDrawables, count);
+            sortDrawablesGrouped(runner->cachedDrawables, count);
         }
         runner->drawableListStructureDirty = false;
         runner->drawableListSortDirty = false;
@@ -1061,6 +1184,7 @@ void Runner_draw(Runner* runner) {
 
     rebuildDrawableCacheIfDirty(runner);
     int32_t drawableCount = (int32_t) arrlen(runner->cachedDrawables);
+    setDrawDepth(runner, 0);
 
     // Draw non-foreground backgrounds (behind everything)
     if (!DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0))
@@ -1069,6 +1193,8 @@ void Runner_draw(Runner* runner) {
     fireDrawSubtype(runner, runner->cachedDrawables, drawableCount, DRAW_BEGIN);
 
     // Draw interleaved tiles and instances
+    HiddenLayers hidden;
+    collectHiddenLayers(runner, &hidden);
     int32_t i = 0;
     DrawKey lastProcessedDrawKey;
 
@@ -1117,6 +1243,7 @@ void Runner_draw(Runner* runner) {
 
         Drawable* d = &runner->cachedDrawables[i++];
         lastProcessedDrawKey = drawableKey(d);
+        setDrawDepth(runner, d->depth);
 
         if (d->type == DRAWABLE_TILE) {
             if (runner->renderer != nullptr) {
@@ -1162,6 +1289,7 @@ void Runner_draw(Runner* runner) {
             Instance* inst = d->instance;
             // Filter inactive/invisible instances at draw time so the cache doesn't need invalidation when those flags toggle.
             if (!inst->active || !inst->visible) continue;
+            if (instanceOnHiddenLayer(runner, &hidden, inst)) continue;
 
             int32_t ownerObjectIndex = -1;
             int32_t codeId;
@@ -1325,6 +1453,7 @@ void Runner_draw(Runner* runner) {
     }
 
     fireDrawSubtype(runner, runner->cachedDrawables, drawableCount, DRAW_END);
+    setDrawDepth(runner, 0);
 
     // Draw foreground backgrounds (in front of instances, behind GUI)
     drawGMS1Backgrounds(runner, true);
@@ -2563,7 +2692,7 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileS
     runner->mouse = RunnerMouse_create();
     runner->appSurfaceEnabled = true;
     runner->windowTitle = dataWin->gen8.displayName ? safeStrdup(dataWin->gen8.displayName) : nullptr;
-    runner->negativeDepthBandFirst = (dataWin->gen8.name != nullptr
+    runner->isThWWW = (dataWin->gen8.name != nullptr
         && strcmp(dataWin->gen8.name, "thWWW") == 0)
         || (dataWin->gen8.displayName != nullptr
             && strstr(dataWin->gen8.displayName, "Wonderful Waking World") != nullptr);
@@ -2858,10 +2987,16 @@ static void Runner_sweepDeadInstanceRefs(Runner* runner) {
     memset(set.idOccupied, 0, cap);
     memset(set.bitsOccupied, 0, cap);
 
+    // Instance ids are a narrow integer range; almost every slot (positions,
+    // speeds, angles) falls outside it, so reject those before hashing.
+    int32_t minDead = INT32_MAX, maxDead = INT32_MIN;
     repeat(deadCount, i) {
         int32_t id = runner->deadRefSweepPending[i];
         deadRefSetInsert(&set, id, gmlRealMatchBits((GMLReal)id));
+        if (id < minDead) minDead = id;
+        if (id > maxDead) maxDead = id;
     }
+    const GMLReal minDeadReal = (GMLReal) minDead, maxDeadReal = (GMLReal) maxDead;
 
     int32_t count = (int32_t) arrlen(runner->instances);
     for (int32_t i = 0; i < count; i++) {
@@ -2875,7 +3010,8 @@ static void Runner_sweepDeadInstanceRefs(Runner* runner) {
             uint8_t vtype = entry->value.type;
             bool dead = false;
             if (vtype == RVALUE_INT32) {
-                dead = deadRefSetContainsId(&set, entry->value.int32);
+                int32_t v = entry->value.int32;
+                dead = v >= minDead && v <= maxDead && deadRefSetContainsId(&set, v);
             }
 #ifndef NO_RVALUE_INT64
             else if (vtype == RVALUE_INT64) {
@@ -2886,7 +3022,8 @@ static void Runner_sweepDeadInstanceRefs(Runner* runner) {
             }
 #endif
             else if (vtype == RVALUE_REAL) {
-                dead = deadRefSetContainsBits(&set, gmlRealMatchBits(entry->value.real));
+                GMLReal v = entry->value.real;
+                dead = v >= minDeadReal && v <= maxDeadReal && deadRefSetContainsBits(&set, gmlRealMatchBits(v));
             }
             if (dead) {
                 entry->value = RValue_makeInt32(INSTANCE_NOONE);

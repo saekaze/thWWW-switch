@@ -1104,12 +1104,13 @@ int loop(CommandLineArgs args, const char *argv0) {
             runner->vmContext->hasFixedSeed = true;
         }
 
-#ifdef ENABLE_VM_TRACING
-        // Test-only bridge for thWWW's authored diagnostics. The release Switch
+#if defined(ENABLE_VM_TRACING) || defined(THWWW_HOST_DEBUG_BRIDGE)
+        // Test-only bridge for thWWW's authored diagnostics (host builds only;
+        // THWWW_HOST_DEBUG_BRIDGE lets untraced profiling builds use it). The release Switch
         // build disables VM tracing, so this cannot enable invincibility in the
         // distributed game. It gives deterministic host regressions access to
         // the game's existing I-key debug toggle without patching game data.
-        if (args.debug && runner->negativeDepthBandFirst
+        if (args.debug && runner->isThWWW
                 && runner->vmContext->globalScopeInstance != nullptr) {
             ptrdiff_t debugVar = shgeti(runner->vmContext->varNameMap, "debug");
             if (debugVar >= 0) {
@@ -1288,6 +1289,19 @@ int loop(CommandLineArgs args, const char *argv0) {
                 }
 
                 // Run one game step (Begin Step, Keyboard, Alarms, Step, End Step, room transitions)
+#ifdef THWWW_HOST_DEBUG_BRIDGE
+                // Host benchmarks: THWWW_FRAMETIME=file logs the wall time of each whole frame.
+                {
+                    static FILE* frameTimeFile = (FILE*) 1;
+                    static struct timespec previous;
+                    if (frameTimeFile == (FILE*) 1) frameTimeFile = getenv("THWWW_FRAMETIME") ? fopen(getenv("THWWW_FRAMETIME"), "w") : nullptr;
+                    struct timespec now;
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+                    if (frameTimeFile != nullptr && previous.tv_sec != 0)
+                        fprintf(frameTimeFile, "%d %.1f\n", runner->frameCount, (double) (now.tv_sec - previous.tv_sec) * 1e6 + (double) (now.tv_nsec - previous.tv_nsec) / 1e3);
+                    previous = now;
+                }
+#endif
                 Runner_step(runner);
 
                 if (freeCamActive) {

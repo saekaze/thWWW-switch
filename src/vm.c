@@ -545,7 +545,7 @@ static inline bool tryFastVarRead(VMContext* ctx, int32_t instanceType, Variable
             // thWWW advances dialogue repeatedly from global.shot_down. Feed
             // that one dialogue read from the dedicated physical R slot so R
             // skips text without becoming a second shoot button in gameplay.
-            if (ctx->runner->negativeDepthBandFirst
+            if (ctx->runner->isThWWW
                     && strcmp(varDef->name, "shot_down") == 0
                     && ctx->currentCodeName != nullptr
                     && strcmp(ctx->currentCodeName, "gml_Object_obj_dialogue_Step_0") == 0
@@ -958,7 +958,7 @@ static RValue resolveVariableRead(VMContext* ctx, int32_t instanceType, uint32_t
     RValue result = *slot;
     result.ownsReference = false;
 #ifdef __SWITCH__
-    if (instanceType == INSTANCE_GLOBAL && ctx->runner->negativeDepthBandFirst
+    if (instanceType == INSTANCE_GLOBAL && ctx->runner->isThWWW
             && strcmp(varDef->name, "shot_down") == 0
             && ctx->currentCodeName != nullptr
             && strcmp(ctx->currentCodeName, "gml_Object_obj_dialogue_Step_0") == 0
@@ -1028,27 +1028,6 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
                     inst = ctx->globalScopeInstance;
 
                 if (inst != nullptr) {
-#ifdef __SWITCH__
-                    if (instanceType == INSTANCE_GLOBAL && ctx->runner->negativeDepthBandFirst) {
-                        // thWWW-switch has a fixed Saekaze-style layout even
-                        // when Data.ini contains an old configurable mapping.
-                        int32_t fixedButton = -1;
-                        if (strcmp(varDef->name, "shot_btn") == 0) fixedButton = GP_FACE1;
-                        else if (strcmp(varDef->name, "bomb_btn") == 0) fixedButton = GP_FACE2;
-                        else if (strcmp(varDef->name, "focused_btn") == 0) fixedButton = GP_FACE3;
-                        else if (strcmp(varDef->name, "pause_btn") == 0) fixedButton = GP_SHOULDERL;
-
-                        if (fixedButton >= 0) {
-                            RValue_free(&val);
-                            val = RValue_makeInt32(fixedButton);
-                        } else if (strcmp(varDef->name, "name_entry") == 0) {
-                            // Keep only the current/new score's name fixed;
-                            // existing leaderboard entries remain untouched.
-                            RValue_free(&val);
-                            val = RValue_makeString("SWITCH");
-                        }
-                    }
-#endif
                     Instance_setSelfVar(inst, varDef->varID, val);
 #ifdef ENABLE_VM_TRACING
                     {
@@ -2419,7 +2398,38 @@ int32_t VM_resolveInstanceTarget(VMContext* ctx, int32_t target) {
 }
 
 // Checks if objectIndex is or inherits from targetObjectIndex by walking the parent chain.
+// Collision queries filter every grid candidate by ancestry (over a billion
+// checks in a Lunatic run), so answer from a table built once per data.win and
+// rebuilt when object_set_parent changes a parent.
+static DataWin* ancestryDataWin = nullptr;
+static uint32_t ancestryCount = 0;
+static uint8_t* ancestryTable = nullptr; // [object * count + ancestor]
+
+void VM_invalidateObjectAncestry(void) {
+    ancestryDataWin = nullptr;
+}
+
+static bool walkObjectAncestry(DataWin* dataWin, int32_t objectIndex, int32_t targetObjectIndex);
+
 bool VM_isObjectOrDescendant(DataWin* dataWin, int32_t objectIndex, int32_t targetObjectIndex) {
+    if (ancestryDataWin != dataWin) {
+        uint32_t count = dataWin->objt.count;
+        free(ancestryTable);
+        ancestryTable = count > 0 && count <= 4096 ? (uint8_t*) calloc((size_t) count * count, 1) : nullptr;
+        if (ancestryTable != nullptr) {
+            for (uint32_t o = 0; o < count; o++)
+                for (uint32_t t = 0; t < count; t++)
+                    ancestryTable[(size_t) o * count + t] = walkObjectAncestry(dataWin, (int32_t) o, (int32_t) t);
+        }
+        ancestryCount = ancestryTable != nullptr ? count : 0;
+        ancestryDataWin = dataWin;
+    }
+    if ((uint32_t) objectIndex < ancestryCount && (uint32_t) targetObjectIndex < ancestryCount)
+        return ancestryTable[(size_t) objectIndex * ancestryCount + (uint32_t) targetObjectIndex] != 0;
+    return walkObjectAncestry(dataWin, objectIndex, targetObjectIndex);
+}
+
+static bool walkObjectAncestry(DataWin* dataWin, int32_t objectIndex, int32_t targetObjectIndex) {
     int32_t currentObj = objectIndex;
     int depth = 0;
     while (currentObj >= 0 && (uint32_t) currentObj < dataWin->objt.count && 32 > depth) {
@@ -3159,9 +3169,18 @@ static RValue executeLoop(VMContext* ctx) {
 #endif
 #endif
 #if VM_USE_COMPUTED_GOTO
+    // A GML exception can only become pending inside a call (a callee's throw,
+    // or the throw/finally builtins), so only the entry and the CALL/CALLV
+    // handlers come through the exception check; every other opcode skips it.
+vm_dispatch_loop_checked:
+    if (!(codeEnd > ip))
+        goto vm_dispatch_done;
+    goto vm_dispatch_exception_check;
 vm_dispatch_loop:
     if (!(codeEnd > ip))
         goto vm_dispatch_done;
+    goto vm_dispatch_decode;
+vm_dispatch_exception_check:
 #else
     while (codeEnd > ip) {
 #endif
@@ -3218,6 +3237,9 @@ vm_dispatch_loop:
         }
 #endif
 
+#if VM_USE_COMPUTED_GOTO
+vm_dispatch_decode:
+#endif
 #ifdef ENABLE_VM_GML_PROFILER
         if (ctx->profiler != nullptr)
             Profiler_tickInstruction(ctx->profiler);
@@ -3706,12 +3728,20 @@ vm_dispatch_loop:
             VM_OPCASE(OP_CALL)
                 VM_SYNC_IP();
                 handleCall(ctx, instr, extraData);
+#if VM_USE_COMPUTED_GOTO
+                goto vm_dispatch_loop_checked;
+#else
                 VM_OPBREAK();
+#endif
 #if IS_WAD17_OR_HIGHER_ENABLED
             VM_OPCASE(OP_CALLV)
                 VM_SYNC_IP();
                 handleCallV(ctx, instr);
+#if VM_USE_COMPUTED_GOTO
+                goto vm_dispatch_loop_checked;
+#else
                 VM_OPBREAK();
+#endif
 #endif
 
             // Return

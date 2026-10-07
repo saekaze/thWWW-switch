@@ -314,7 +314,7 @@ static void flushBatch(GLRenderer* gl) {
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gl->ebo);
 
         int32_t stride = sizeof(Vertex);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, (void*) offsetof(Vertex, x));
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*) offsetof(Vertex, x));
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, (void*) offsetof(Vertex, r));
         glEnableVertexAttribArray(1);
@@ -367,8 +367,8 @@ static void glDrawVertexBuffer(Renderer* renderer, const RendererVertex* vertice
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr) vertexCount * (GLsizeiptr) sizeof(RendererVertex), vertices, GL_DYNAMIC_DRAW);
     if (hasVAO()) glBindVertexArray(gl->vao);
 
-    // GameMaker's in_Position is vec3 for user vertex formats. The regular
-    // sprite batch restores this attribute to vec2 after the submission.
+    // GameMaker's in_Position is vec3 for user vertex formats (the sprite
+    // batch uses vec3 too, with z = the layer depth).
     int32_t stride = sizeof(RendererVertex);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*) offsetof(RendererVertex, x));
     glEnableVertexAttribArray(0);
@@ -390,7 +390,7 @@ static void glDrawVertexBuffer(Renderer* renderer, const RendererVertex* vertice
     glDrawArrays(mode, 0, vertexCount);
     g_dbgImmDraws++; g_dbgImmVerts += vertexCount; // TEMP
 
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, (void*) offsetof(RendererVertex, x));
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*) offsetof(RendererVertex, x));
     gl->batchCount = 0;
     gl->currentTextureId = 0;
 }
@@ -689,7 +689,7 @@ static void glInit(Renderer* renderer, DataWin* dataWin) {
     if (hasVAO()) {
         // Vertex attributes: pos(2f), texcoord(2f), color(4f)
         int32_t stride = sizeof(Vertex);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, (void*) offsetof(Vertex, x));
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*) offsetof(Vertex, x));
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, (void*) offsetof(Vertex, r));
         glEnableVertexAttribArray(1);
@@ -770,6 +770,8 @@ static void glGpuSetShader(Renderer* renderer, int32_t shaderIndex) {
 
     Matrix4f_flipClipY(&flippedClip[MATRIX_PROJECTION]);
     Matrix4f_flipClipY(&flippedClip[MATRIX_WORLD_VIEW_PROJECTION]);
+    Matrix4f_d3dDepthToGl(&flippedClip[MATRIX_PROJECTION]);
+    Matrix4f_d3dDepthToGl(&flippedClip[MATRIX_WORLD_VIEW_PROJECTION]);
 
     if (gmMatricesUniform != nullptr) {
         glUniformMatrix4fv(gmMatricesUniform->location, 5, GL_FALSE, flippedClip[0].m);
@@ -804,6 +806,8 @@ static void glShaderSettingsRefresh(Renderer* renderer) {
         //I was making the Legacy OpenGL renderer work with the projections, then I realized I think I only need to flip the Projection(s) and not the other ones
         Matrix4f_flipClipY(&flippedClip[MATRIX_PROJECTION]);
         Matrix4f_flipClipY(&flippedClip[MATRIX_WORLD_VIEW_PROJECTION]);
+        Matrix4f_d3dDepthToGl(&flippedClip[MATRIX_PROJECTION]);
+        Matrix4f_d3dDepthToGl(&flippedClip[MATRIX_WORLD_VIEW_PROJECTION]);
 
         glUniformMatrix4fv(gl->uWorldViewProjection->location, 1, GL_FALSE, flippedClip[MATRIX_WORLD_VIEW_PROJECTION].m);
         glUniform4f(gl->uFogColor->location, fogR, fogG, fogB, gl->fogEnable ? 1.0f : 0.0f);
@@ -1215,7 +1219,9 @@ static void emitTexturedQuad(
 
     Vertex* verts = gl->vertexData + gl->batchCount * VERTICES_PER_QUAD;
     uint8_t ca = floatToUnormByte(alpha);
+    float z = gl->base.drawDepth;
 
+    verts[0].z = verts[1].z = verts[2].z = verts[3].z = z;
     verts[0].x = x0; verts[0].y = y0; verts[0].u = u0; verts[0].v = v0; verts[0].r = r0; verts[0].g = g0; verts[0].b = b0; verts[0].a = ca;
     verts[1].x = x1; verts[1].y = y1; verts[1].u = u1; verts[1].v = v0; verts[1].r = r1; verts[1].g = g1; verts[1].b = b1; verts[1].a = ca;
     verts[2].x = x2; verts[2].y = y2; verts[2].u = u1; verts[2].v = v1; verts[2].r = r2; verts[2].g = g2; verts[2].b = b2; verts[2].a = ca;
@@ -1875,6 +1881,7 @@ static void glDrawTriangle(Renderer *renderer, float x1, float y1, float x2, flo
         Vertex* verts = gl->vertexData + gl->batchCount * VERTICES_PER_TRIANGLE;
         uint8_t ca = floatToUnormByte(alpha);
 
+        verts[0].z = verts[1].z = verts[2].z = gl->base.drawDepth;
         verts[0].x = x1; verts[0].y = y1; verts[0].u = 0.0f; verts[0].v = 0.0f; verts[0].r = (uint8_t) BGR_R(color1); verts[0].g = (uint8_t) BGR_G(color1); verts[0].b = (uint8_t) BGR_B(color1); verts[0].a = ca;
         verts[1].x = x2; verts[1].y = y2; verts[1].u = 0.0f; verts[1].v = 0.0f; verts[1].r = (uint8_t) BGR_R(color2); verts[1].g = (uint8_t) BGR_G(color2); verts[1].b = (uint8_t) BGR_B(color2); verts[1].a = ca;
         verts[2].x = x3; verts[2].y = y3; verts[2].u = 0.0f; verts[2].v = 0.0f; verts[2].r = (uint8_t) BGR_R(color3); verts[2].g = (uint8_t) BGR_G(color3); verts[2].b = (uint8_t) BGR_B(color3); verts[2].a = ca;

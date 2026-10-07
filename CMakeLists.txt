@@ -298,6 +298,10 @@ if(PLATFORM STREQUAL "cli" OR PLATFORM STREQUAL "vita" OR PLATFORM STREQUAL "swi
     elseif(PLATFORM STREQUAL "switch")
         if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
             add_compile_options(-ffast-math)
+            # devkitA64's Release default is -O2; -O3 measured ~8% faster on
+            # dense Lunatic stages (the GML interpreter loop). The target
+            # already exists here, so add_compile_options would not reach it.
+            target_compile_options(butterscotch PRIVATE -O3)
         endif()
 
         add_compile_definitions(PLATFORM_SWITCH)

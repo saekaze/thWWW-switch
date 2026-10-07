@@ -318,6 +318,7 @@ RValue VM_executeCode(VMContext* ctx, int32_t codeIndex);
 RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t argCount);
 void VM_free(VMContext* ctx);
 bool VM_isObjectOrDescendant(DataWin* dataWin, int32_t objectIndex, int32_t targetObjectIndex);
+void VM_invalidateObjectAncestry(void);
 int32_t VM_resolveInstanceTarget(VMContext* ctx, int32_t target);
 void VM_buildCrossReferences(VMContext* ctx);
 void VM_disassemble(VMContext* ctx, int32_t codeIndex);
