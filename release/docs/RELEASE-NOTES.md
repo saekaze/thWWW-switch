@@ -1,3 +1,9 @@
+# thWWW-switch — update 3
+
+- **Safer saves:** `Data.ini` holds all progress, unlocks, spell history and scores and is rewritten whenever a spell card starts. It was overwritten in place, so a crash or power loss at that moment could leave it empty. Saves are now written to a `.tmp` file and swapped in; a complete `.tmp` left by an interrupted swap is picked up on the next launch.
+
+---
+
 # thWWW-switch — October 2026 update
 
 ## What's new
