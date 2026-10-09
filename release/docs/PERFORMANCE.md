@@ -94,4 +94,4 @@ Changes, all with identical game state:
 - Interpreter: the pending-exception check runs at entry and after CALL/CALLV only (the only places one can be raised) instead of before every instruction.
 - `-O3` for the Switch build (about 8% on its own).
 
-The rest is GameMaker script execution: on these stages most of the time is the bytecode interpreter running the bullets' Step and Draw events. On hardware at the stock 1020 MHz, this update runs the hardest Lunatic cards at 49–57 FPS (mostly around 55), up from about 49–50. The port itself runs at stock clocks. With the CPU overclocked (tested docked with a ~1.7 GHz overclock) the same cards hold 60 FPS, so an overclock is recommended for Lunatic playthroughs.
+The rest is GameMaker script execution: on these stages most of the time is the bytecode interpreter running the bullets' Step and Draw events. The port itself runs at stock clocks. With the CPU overclocked (tested docked with a ~1.7 GHz overclock) the same cards hold 60 FPS, so an overclock is recommended for Lunatic playthroughs.

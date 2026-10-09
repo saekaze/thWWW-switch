@@ -80,7 +80,7 @@ High scores and replays use the game's own name entry (pick the letters with the
 
 The port runs at the Switch's stock clocks; it does not change them.
 
-**An overclock is recommended for Lunatic playthroughs.** thWWW is a GameMaker game, so every bullet runs GameMaker script code through an interpreter. On the hardest Lunatic spell cards that is several hundred bullets running their scripts every frame, and at the stock 1020 MHz CPU clock the Switch runs them at 49–57 FPS (mostly around 55). With the CPU overclocked (tested docked with a ~1.7 GHz overclock) those cards hold 60 FPS; a smaller overclock will probably be enough.
+**An overclock is recommended for Lunatic playthroughs.** thWWW is a GameMaker game, so every bullet runs GameMaker script code through an interpreter. On the hardest Lunatic spell cards that is several hundred bullets running their scripts every frame, and at the stock 1020 MHz CPU clock the Switch reaches about 50 FPS there. With the CPU overclocked (tested docked with a ~1.7 GHz overclock) those cards hold 60 FPS; a smaller overclock will probably be enough.
 
 This update also cut the port's own CPU work on dense Lunatic patterns by about 24% (measured on PC across Lunatic stages 3–5, with identical game state frame by frame), but the remaining cost is the game's own scripts. Holding 60 FPS at stock clocks there would need those scripts compiled to native code instead of interpreted, which is a much larger project. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 

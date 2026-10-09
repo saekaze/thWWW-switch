@@ -1,7 +1,10 @@
 <img width="256" height="256" alt="image" src="https://github.com/user-attachments/assets/c29c369a-ef82-4d4e-8b60-7ccb3ddfa7b9" />
 
-- **Safer saves.** `Data.ini` (progress, unlocks, spell history, scores) is rewritten whenever a spell card starts. It used to be overwritten in place, so a crash or power loss at that moment could leave it empty. It is now written to `Data.ini.tmp` and swapped in, and a leftover complete `.tmp` is picked up on the next launch.
-
-Includes everything from update 2 (stage 5 fix, Key Config, name entry, faster dense patterns; overclock recommended for Lunatic).
+- Stage 5 background fixed: the boat interior looks like the PC game again.
+- Stage 2 no longer shows stray green lines.
+- About 24% less CPU work on dense Lunatic patterns.
+- Overclock recommended for Lunatic playthroughs: at the stock 1020 MHz the hardest spell cards run at 49–57 FPS (mostly around 55) (every bullet runs the game's GameMaker scripts through an interpreter). Tested docked with a ~1.7 GHz overclock, they hold 60 FPS; a smaller overclock will probably also work.
+- Remappable controls: Option → Key Config can rebind shot, focus, bomb and pause. Defaults unchanged (B shoot, A bomb, L/ZL focus, + pause, R/ZR hold to skip dialogue); X and Y are free to bind.
+- High scores and replays use the game's own name entry again instead of "SWITCH".
 
 Replace thwww.nro in /switch/thwww/. Your save/ folder is kept.
