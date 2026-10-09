@@ -65,16 +65,54 @@ static bool pathExists(const char* fullPath) {
 
 // Returns a heap-allocated full path for reads. Absolute inputs pass through as-is.
 // For relative inputs, savePath wins if the file exists there, else bundlePath.
+// Saves are written to "<file>.tmp" and then swapped in (FAT's rename does
+// not replace, so the old file is removed first). A crash or power loss while
+// writing leaves the previous save intact instead of a truncated Data.ini; if
+// it hits between the remove and the rename, the complete .tmp is picked up
+// again the next time the file is looked up.
+static void recoverPendingSave(const char* path) {
+    if (pathExists(path)) return;
+    size_t len = strlen(path);
+    char* temporary = (char*) safeMalloc(len + 5);
+    memcpy(temporary, path, len);
+    memcpy(temporary + len, ".tmp", 5);
+    if (pathExists(temporary)) rename(temporary, path);
+    free(temporary);
+}
+
+static bool writeWholeFile(const char* path, const void* data, size_t size) {
+    size_t len = strlen(path);
+    char* temporary = (char*) safeMalloc(len + 5);
+    memcpy(temporary, path, len);
+    memcpy(temporary + len, ".tmp", 5);
+    FILE* f = fopen(temporary, "wb");
+    if (f == nullptr) { free(temporary); return false; }
+    bool ok = size == 0 || fwrite(data, 1, size, f) == size;
+    ok = (fclose(f) == 0) && ok;
+    if (ok) {
+        remove(path);
+        ok = rename(temporary, path) == 0;
+    } else {
+        remove(temporary);
+    }
+    free(temporary);
+    return ok;
+}
+
 static char* resolveForRead(OverlayFileSystem* ofs, const char* relativePath) {
     char* normalized = normalizePath(relativePath);
     size_t saveLen = strlen(ofs->savePath);
-    if (strncmp(normalized, ofs->savePath, saveLen) == 0) return normalized;
+    if (strncmp(normalized, ofs->savePath, saveLen) == 0) {
+        recoverPendingSave(normalized);
+        return normalized;
+    }
 
     // A path built from working_directory still participates in the overlay:
     // prefer its save copy, then fall back to the read-only bundle copy.
     size_t bundleLen = strlen(ofs->bundlePath);
     if (strncmp(normalized, ofs->bundlePath, bundleLen) == 0) {
         char* saveFull = joinPath(ofs->savePath, normalized + bundleLen);
+        recoverPendingSave(saveFull);
         if (pathExists(saveFull)) {
             free(normalized);
             return saveFull;
@@ -85,6 +123,7 @@ static char* resolveForRead(OverlayFileSystem* ofs, const char* relativePath) {
     if (isAbsolute(normalized)) return normalized;
 
     char* saveFull = joinPath(ofs->savePath, normalized);
+    recoverPendingSave(saveFull);
     if (pathExists(saveFull)) {
         free(normalized);
         return saveFull;
@@ -184,14 +223,9 @@ static char* overlayReadFileText(FileSystem* fs, const char* relativePath) {
 static bool overlayWriteFileText(FileSystem* fs, const char* relativePath, const char* contents) {
     char* fullPath = resolveForWrite((OverlayFileSystem*) fs, relativePath);
     ensureParentDir(fullPath);
-    FILE* f = fopen(fullPath, "wb");
+    bool ok = writeWholeFile(fullPath, contents, strlen(contents));
     free(fullPath);
-    if (f == nullptr) return false;
-
-    size_t len = strlen(contents);
-    size_t written = fwrite(contents, 1, len, f);
-    fclose(f);
-    return written == len;
+    return ok;
 }
 
 static bool overlayDeleteFile(FileSystem* fs, const char* relativePath) {
@@ -221,15 +255,12 @@ static bool overlayReadFileBinary(FileSystem* fs, const char* relativePath, uint
 }
 
 static bool overlayWriteFileBinary(FileSystem* fs, const char* relativePath, const uint8_t* data, int32_t size) {
+    if (size < 0) return false;
     char* fullPath = resolveForWrite((OverlayFileSystem*) fs, relativePath);
     ensureParentDir(fullPath);
-    FILE* f = fopen(fullPath, "wb");
+    bool ok = writeWholeFile(fullPath, data, (size_t) size);
     free(fullPath);
-    if (f == nullptr) return false;
-
-    size_t written = fwrite(data, 1, (size_t) size, f);
-    fclose(f);
-    return written == (size_t) size;
+    return ok;
 }
 
 // ===[ Streaming Binary I/O ]===
