@@ -72,7 +72,7 @@ Runtime writes are redirected to:
 sd:/switch/thwww/save/
 ```
 
-This includes `Data.ini` and working-directory-prefixed replay files. Each save is written to a `.tmp` file first and then swapped in, so a crash or power loss while saving cannot leave a truncated `Data.ini`. Reads prefer the save copy and fall back to the original game folder. Back up `save/` before replacing an installation.
+This includes `Data.ini` and working-directory-prefixed replay files. Reads prefer the save copy and fall back to the original game folder. Back up `save/` before replacing an installation.
 
 High scores and replays use the game's own name entry (pick the letters with the D-Pad and confirm with shot), and the name is remembered in `Data.ini`. Earlier builds of this port forced the name `SWITCH`; those leaderboard entries stay as they are.
 
